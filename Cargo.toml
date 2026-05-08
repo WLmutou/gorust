@@ -1,0 +1,36 @@
+[package]
+name = "gorust"
+version = "0.1.0"
+edition = "2024"
+
+
+
+[dependencies]
+crossbeam = "0.8"
+parking_lot = "0.12"
+num_cpus = "1.6"
+lazy_static = "1.4"
+mio = { version = "0.8", features = ["os-poll", "net"] }
+log = "0.4"
+env_logger = "0.10"
+
+[dependencies.go-macros]
+path = "./go-macros"
+
+[workspace]
+members = [
+    ".",
+    "go-macros",
+]
+
+
+[dev-dependencies]
+criterion = "0.5"
+
+
+[profile.release]
+opt-level = 3
+lto = "fat"          
+codegen-units = 1     
+panic = "abort"      
+strip = true
