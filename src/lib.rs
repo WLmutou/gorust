@@ -5,6 +5,7 @@ pub mod channel;
 pub mod go_runtime;
 pub mod scheduler;
 pub mod sync;
+pub mod timer;
 
 // 导出公共接口
 pub use channel::{Channel, Sender, Receiver, Selectable};

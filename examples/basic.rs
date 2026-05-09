@@ -1,8 +1,7 @@
 // examples/basic.rs
-use gorust::go;
-use gorust::runtime;
+use gorust::{go,runtime, Runtime, yield_now};
 use gorust::sync::WaitGroup;
-use gorust::{Runtime, yield_now};
+
 
 #[runtime]
 fn main() {

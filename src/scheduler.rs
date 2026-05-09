@@ -1,8 +1,11 @@
+// src/scheduler.rs
 use crate::go_runtime::Runtime;
+use crate::timer;
 use crossbeam::queue::ArrayQueue;
 use lazy_static::lazy_static;
 use log::debug;
 use parking_lot::Mutex;
+use std::cell::RefCell;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
@@ -11,9 +14,14 @@ use std::time::{Duration, Instant};
 
 // ============== 优化参数 ==============
 const LOCAL_QUEUE_SIZE: usize = 256;
-const WORK_STEALING_ATTEMPTS: usize = 2; // 减少窃取尝试
-const MAX_SPIN_ITERATIONS: usize = 100; // 自旋等待次数
-const SLEEP_DURATION: Duration = Duration::from_micros(50); // 减少休眠时间
+const WORK_STEALING_ATTEMPTS: usize = 2;
+const MAX_SPIN_ITERATIONS: usize = 100;
+const SLEEP_DURATION: Duration = Duration::from_micros(50);
+
+// ============= 添加 thread_local! 宏 ===========
+thread_local! {
+    static CURRENT_G: RefCell<Option<Arc<G>>> = RefCell::new(None);
+}
 
 // ============== G (Goroutine) ==============
 #[repr(u8)]
@@ -27,7 +35,7 @@ pub enum GStatus {
 }
 
 pub struct G {
-    id: usize,
+    pub id: usize,
     status: AtomicU8,
     func: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
     created_at: Instant,
@@ -72,7 +80,6 @@ impl G {
 
 impl Drop for G {
     fn drop(&mut self) {
-        // 只在调试模式打印
         if cfg!(debug_assertions) {
             debug!(
                 "[G{}] Dropped (ran for {:?})",
@@ -88,7 +95,7 @@ impl From<u8> for GStatus {
     fn from(v: u8) -> Self {
         match v {
             0 => GStatus::Idle,
-            1 => GStatus::Idle,
+            1 => GStatus::Runnable,
             2 => GStatus::Running,
             3 => GStatus::Waiting,
             4 => GStatus::Dead,
@@ -111,7 +118,7 @@ pub struct P {
     local_queue: ArrayQueue<Arc<G>>,
     runnext: AtomicPtr<G>,
     work_count: AtomicUsize,
-    steals: AtomicUsize, // 统计窃取次数
+    steals: AtomicUsize,
 }
 
 impl P {
@@ -128,13 +135,11 @@ impl P {
 
     #[inline]
     pub fn add_g(&self, g: Arc<G>) {
-        // 使用 LIFO 优化缓存局部性
         let old_ptr = self
             .runnext
             .swap(Arc::into_raw(g.clone()) as *mut _, Ordering::Release);
         if !old_ptr.is_null() {
             let old_g = unsafe { Arc::from_raw(old_ptr) };
-            // 本地队列满时尝试立即处理
             if self.local_queue.push(old_g.clone()).is_err() {
                 Scheduler::push_global_batch(&[old_g]);
             }
@@ -144,7 +149,6 @@ impl P {
 
     #[inline]
     pub fn pop_g(&self) -> Option<Arc<G>> {
-        // 优先从 runnext 获取
         let runnext_ptr = self.runnext.swap(ptr::null_mut(), Ordering::AcqRel);
         if !runnext_ptr.is_null() {
             let g = unsafe { Arc::from_raw(runnext_ptr) };
@@ -152,7 +156,6 @@ impl P {
             return Some(g);
         }
 
-        // 从本地队列获取
         let g = self.local_queue.pop();
         if let Some(ref _g) = g {
             self.work_count.fetch_sub(1, Ordering::Relaxed);
@@ -167,7 +170,7 @@ impl P {
             return Vec::new();
         }
 
-        let steal_count = len / 3; // 窃取 1/3 而不是 1/2
+        let steal_count = len / 3;
         let mut stolen = Vec::with_capacity(steal_count);
 
         for _ in 0..steal_count {
@@ -255,83 +258,59 @@ impl Scheduler {
         }
     }
 
-    pub fn init() {
+    // pub fn init() {
+    //     let p_count = num_cpus::get();
+    //     let m_count = p_count;
+
+    //     debug!("   Starting {} workers (GOMAXPROCS={})", m_count, p_count);
+
+    //     timer::init_timer_thread();
+
+    //     for i in 0..m_count {
+    //         let p = SCHEDULER.processors[i % p_count].clone();
+
+    //         thread::Builder::new()
+    //             .name(format!("gorust-worker-{}", i))
+    //             .spawn(move || {
+    //                 Self::worker_loop(i, p);
+    //             })
+    //             .unwrap();
+    //     }
+    // }
+
+     pub fn init() {
         let p_count = num_cpus::get();
         let m_count = p_count;
 
         debug!("   Starting {} workers (GOMAXPROCS={})", m_count, p_count);
 
+        timer::init_timer_thread();
+
         for i in 0..m_count {
             let p = SCHEDULER.processors[i % p_count].clone();
 
             thread::Builder::new()
-                .name(format!("rgo-worker-{}", i))
+                .name(format!("gorust-worker-{}", i))
                 .spawn(move || {
                     Self::worker_loop(i, p);
                 })
                 .unwrap();
         }
+        
+        // 注册 atexit 处理函数
+        ctrlc::set_handler(|| {
+            Scheduler::shutdown();
+        }).ok();
     }
 
-    fn worker_loop(id: usize, p: Arc<P>) {
-        if cfg!(debug_assertions) {
-            debug!("[Worker {}] Started with P{}", id, p.id);
-        }
-        p.set_status(PStatus::Running);
-
-        let mut spin_count = 0;
-
-        while SCHEDULER.running.load(Ordering::Relaxed) {
-            // 尝试获取 G
-            if let Some(g) = Self::get_runnable_g(&p) {
-                spin_count = 0;
-
-                // 执行 G
-                g.set_status(GStatus::Running);
-                if cfg!(debug_assertions) {
-                    debug!("[Worker {}] Executing G{}", id, g.id);
-                }
-
-                g.run();
-
-                g.set_status(GStatus::Dead);
-                if cfg!(debug_assertions) {
-                    debug!("[Worker {}] G{} completed", id, g.id);
-                }
-            } else {
-                // 自适应休眠策略
-                if spin_count < MAX_SPIN_ITERATIONS {
-                    spin_count += 1;
-                    SCHEDULER.stats.total_spins.fetch_add(1, Ordering::Relaxed);
-                    thread::yield_now();
-                } else {
-                    SCHEDULER.stats.total_sleeps.fetch_add(1, Ordering::Relaxed);
-                    thread::sleep(SLEEP_DURATION);
-                }
-            }
-        }
-
-        if cfg!(debug_assertions) {
-            debug!(
-                "[Worker {}] Shutting down (steals: {})",
-                id,
-                p.steal_count()
-            );
-        }
-    }
-
-    #[inline]
     fn get_runnable_g(p: &P) -> Option<Arc<G>> {
-        // 1. 优先从本地队列获取
         if let Some(g) = p.pop_g() {
             return Some(g);
         }
 
-        // 2. 从全局队列获取（批量）
         {
             let mut global = SCHEDULER.global_queue.lock();
             if let Some(g) = global.pop() {
-                // 尝试多取几个到本地队列
                 let batch_size = global.len().min(8);
                 for _ in 0..batch_size {
                     if let Some(g_batch) = global.pop() {
@@ -342,7 +321,6 @@ impl Scheduler {
             }
         }
 
-        // 3. 工作窃取
         for _ in 0..WORK_STEALING_ATTEMPTS {
             for other_p in SCHEDULER.processors.iter() {
                 if other_p.id == p.id {
@@ -368,11 +346,6 @@ impl Scheduler {
         global.extend_from_slice(gs);
     }
 
-    // fn push_global(g: Arc<G>) {
-    //     let mut global = SCHEDULER.global_queue.lock();
-    //     global.push(g);
-    // }
-
     pub fn go<F>(f: F) -> Arc<G>
     where
         F: FnOnce() + Send + 'static,
@@ -380,19 +353,10 @@ impl Scheduler {
         let id = SCHEDULER.next_g_id.fetch_add(1, Ordering::Relaxed);
         let g = Arc::new(G::new(id, f));
 
-        // 负载均衡：轮流分配到不同的 P
         let p_idx = id % SCHEDULER.processors.len();
         SCHEDULER.processors[p_idx].add_g(g.clone());
 
         g
-    }
-
-    pub fn shutdown() {
-        SCHEDULER.running.store(false, Ordering::Relaxed);
-    }
-
-    pub fn yield_now() {
-        thread::yield_now();
     }
 
     pub fn print_stats() {
@@ -418,6 +382,100 @@ impl Scheduler {
         );
         debug!("Processors: {}", SCHEDULER.processors.len());
     }
+
+    fn worker_loop(id: usize, p: Arc<P>) {
+        if cfg!(debug_assertions) {
+            debug!("[Worker {}] Started with P{}", id, p.id);
+        }
+        p.set_status(PStatus::Running);
+
+        let mut spin_count = 0;
+
+        while SCHEDULER.running.load(Ordering::Relaxed) {
+            if let Some(g) = Self::get_runnable_g(&p) {
+                spin_count = 0;
+
+                Self::set_current_g(Some(g.clone()));
+
+                g.set_status(GStatus::Running);
+                if cfg!(debug_assertions) {
+                    debug!("[Worker {}] Executing G{}", id, g.id);
+                }
+
+                g.run();
+
+                let status = g.status();
+                if status == GStatus::Running {
+                    g.set_status(GStatus::Dead);
+                    if cfg!(debug_assertions) {
+                        debug!("[Worker {}] G{} completed", id, g.id);
+                    }
+                } else if cfg!(debug_assertions) {
+                    debug!("[Worker {}] G{} changed state to {:?}", id, g.id, status);
+                }
+
+                Self::set_current_g(None);
+            } else {
+                if spin_count < MAX_SPIN_ITERATIONS {
+                    spin_count += 1;
+                    SCHEDULER.stats.total_spins.fetch_add(1, Ordering::Relaxed);
+                    thread::yield_now();
+                } else {
+                    SCHEDULER.stats.total_sleeps.fetch_add(1, Ordering::Relaxed);
+                    thread::sleep(SLEEP_DURATION);
+                }
+            }
+        }
+
+        if cfg!(debug_assertions) {
+            debug!("[Worker {}] Shutting down", id);
+        }
+    }
+
+    pub fn shutdown() {
+        SCHEDULER.running.store(false, Ordering::Relaxed);
+        timer::shutdown_timer();
+    }
+
+    pub fn yield_now() {
+        thread::yield_now();
+    }
+
+    pub fn is_running() -> bool {
+        SCHEDULER.running.load(Ordering::Relaxed)
+    }
+
+    pub fn current_g() -> Option<Arc<G>> {
+        CURRENT_G.with(|cell| cell.borrow().clone())
+    }
+
+    pub fn set_current_g(g: Option<Arc<G>>) {
+        CURRENT_G.with(|cell| *cell.borrow_mut() = g);
+    }
+
+    pub fn wake_g(g: Arc<G>) {
+        if g.status() == GStatus::Dead {
+            if cfg!(debug_assertions) {
+                log::debug!("[Scheduler] Attempted to wake dead G{}", g.id);
+            }
+            return;
+        }
+
+        if g.status() != GStatus::Waiting {
+            if cfg!(debug_assertions) {
+                log::debug!(
+                    "[Scheduler] Waking G{} but status is {:?}",
+                    g.id,
+                    g.status()
+                );
+            }
+        }
+
+        g.set_status(GStatus::Runnable);
+
+        let p_idx = g.id % SCHEDULER.processors.len();
+        SCHEDULER.processors[p_idx].add_g(g);
+    }
 }
 
 // ============== 公共 API ==============
@@ -434,4 +492,8 @@ pub fn yield_now() {
 
 pub fn print_scheduler_stats() {
     Scheduler::print_stats()
+}
+
+pub fn shutdown() {
+    Scheduler::shutdown()
 }

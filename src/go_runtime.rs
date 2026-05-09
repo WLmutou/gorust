@@ -9,6 +9,8 @@ lazy_static! {
     static ref RUNTIME_STATE: Arc<RuntimeState> = Arc::new(RuntimeState::new());
 }
 
+static ACTIVE_GOROUTINES: AtomicUsize = AtomicUsize::new(0);
+
 struct RuntimeState {
     active_goroutines: AtomicUsize,
     shutdown: AtomicBool,
@@ -44,6 +46,8 @@ impl RuntimeState {
     fn total_count(&self) -> usize {
         self.total_goroutines.load(Ordering::Relaxed)
     }
+
+    
 }
 
 pub struct Runtime;
@@ -96,22 +100,22 @@ impl Runtime {
         RUNTIME_STATE.shutdown.load(Ordering::Relaxed)
     }
 
-    /// 记录新创建的 goroutine
-    #[inline]
-    pub(crate) fn track_goroutine() {
-        RUNTIME_STATE.inc_goroutine();
-    }
+    // /// 记录新创建的 goroutine
+    // #[inline]
+    // pub(crate) fn track_goroutine() {
+    //     RUNTIME_STATE.inc_goroutine();
+    // }
 
     /// goroutine 完成时调用
-    #[inline]
-    pub(crate) fn untrack_goroutine() {
-        RUNTIME_STATE.dec_goroutine();
-    }
+    // #[inline]
+    // pub(crate) fn untrack_goroutine() {
+    //     RUNTIME_STATE.dec_goroutine();
+    // }
 
     /// 获取当前活跃的 goroutine 数量
-    pub fn active_goroutines() -> usize {
-        RUNTIME_STATE.active_count()
-    }
+    // pub fn active_goroutines() -> usize {
+    //     RUNTIME_STATE.active_count()
+    // }
 
     /// 获取总共创建的 goroutine 数量
     pub fn total_goroutines() -> usize {
@@ -121,5 +125,31 @@ impl Runtime {
     /// 获取运行时长
     pub fn uptime() -> Duration {
         RUNTIME_STATE.start_time.elapsed()
+    }
+
+    #[inline]
+    pub fn track_goroutine() {
+        ACTIVE_GOROUTINES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn untrack_goroutine() {
+        ACTIVE_GOROUTINES.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn active_goroutines() -> usize {
+        ACTIVE_GOROUTINES.load(Ordering::Relaxed)
+    }
+
+    /// 等待所有 goroutine 完成并关闭调度器
+    pub fn wait_and_shutdown() {
+        // 等待所有 goroutine 完成
+        while Self::active_goroutines() > 0 {
+            std::thread::yield_now();
+        }
+        
+        // 关闭调度器
+        scheduler::shutdown();
     }
 }
