@@ -1,7 +1,7 @@
 [package]
 name = "go-macros"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 authors = ["lijun <1489573464@qq.com>"]
 description = "Procedural macros for the gorust crate - providing Go-style concurrency macros for Rust"
 license = "MIT"
