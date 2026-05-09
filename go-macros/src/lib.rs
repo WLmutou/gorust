@@ -9,7 +9,6 @@ use select_parse::parse_select;
 ///
 /// # Example
 /// ```rust
-/// use log::debug;
 /// use gorust::{runtime, go, make_chan};
 ///
 /// #[runtime]
@@ -43,7 +42,7 @@ pub fn runtime(_args: TokenStream, input: TokenStream) -> TokenStream {
 
             let original_hook = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |panic_info| {
-                log::error!("[Goroutine panic] {}", panic_info);
+                println!("[Goroutine panic] {}", panic_info);
                 original_hook(panic_info);
             }));
 
