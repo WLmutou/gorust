@@ -27,7 +27,7 @@ Or when it's published on crates.io:
 
 ```toml
 [dependencies]
-gorust = "0.1.0" # Replace with actual version
+gorust = "0.1.2" # Replace with actual version
 ```
 
 ## Usage
@@ -35,8 +35,9 @@ gorust = "0.1.0" # Replace with actual version
 Here's a simple example demonstrating how to use gorust:
 
 ```rust
-use gorust::{go, channel};
+use gorust::{runtime, go, channel};
 
+#[runtime]
 fn main() {
     let (tx, rx) = channel::new();
     
