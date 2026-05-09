@@ -1,6 +1,7 @@
 // src/scheduler.rs
 use crate::go_runtime::Runtime;
 use crate::timer;
+use crate::stack::{GoroutineStack, StackAllocator};
 use crossbeam::queue::ArrayQueue;
 use lazy_static::lazy_static;
 use log::debug;
@@ -39,6 +40,9 @@ pub struct G {
     status: AtomicU8,
     func: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
     created_at: Instant,
+    // 新增栈管理
+    stack: Option<Arc<GoroutineStack>>,
+    stack_used: AtomicUsize,
 }
 
 unsafe impl Send for G {}
@@ -50,12 +54,16 @@ impl G {
     where
         F: FnOnce() + Send + 'static,
     {
+        let stack_allocator = StackAllocator::new();
+        let stack = stack_allocator.alloc().ok();
         Runtime::track_goroutine();
         G {
             id,
             status: AtomicU8::new(GStatus::Idle as u8),
             func: Mutex::new(Some(Box::new(f))),
             created_at: Instant::now(),
+            stack: stack.map(Arc::new),
+            stack_used: AtomicUsize::new(0),
         }
     }
 
@@ -76,6 +84,18 @@ impl G {
     pub fn set_status(&self, status: GStatus) {
         self.status.store(status as u8, Ordering::Release);
     }
+    // 检查栈使用情况
+    pub fn check_stack(&self) -> bool {
+        if let Some(stack) = &self.stack {
+            let used = self.stack_used.load(Ordering::Relaxed);
+            if stack.needs_grow(used) {
+                // 触发栈扩容
+                return false;
+            }
+        }
+        true
+    }
+    
 }
 
 impl Drop for G {

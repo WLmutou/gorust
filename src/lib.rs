@@ -6,6 +6,9 @@ pub mod go_runtime;
 pub mod scheduler;
 pub mod sync;
 pub mod timer;
+pub mod stack;
+pub mod netpoller;
+pub mod net;
 
 // 导出公共接口
 pub use channel::{Channel, Sender, Receiver, Selectable};
