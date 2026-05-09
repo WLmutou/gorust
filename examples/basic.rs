@@ -1,27 +1,27 @@
 // examples/basic.rs
-use gorust::runtime;
 use gorust::go;
-use gorust::{yield_now, Runtime};
+use gorust::runtime;
 use gorust::sync::WaitGroup;
+use gorust::{Runtime, yield_now};
 
 #[runtime]
 fn main() {
     println!("=== Basic Goroutine Example ===");
-    
+
     // 简单的 goroutine
     go(|| {
         println!("Hello from goroutine 1!");
     });
-    
+
     // 带参数的 goroutine
     for i in 0..5 {
         go(move || {
             println!("Goroutine {} is running", i);
-            yield_now();  // 主动让出 CPU
+            yield_now(); // 主动让出 CPU
             println!("Goroutine {} done", i);
         });
     }
-    
+
     // 使用 WaitGroup
     let wg = WaitGroup::new();
     for i in 0..3 {
@@ -34,10 +34,10 @@ fn main() {
             wg_clone.done();
         });
     }
-    
+
     wg.wait();
     println!("All tasks completed!");
-    
+
     // 打印统计信息
     println!("\n=== Runtime Statistics ===");
     println!("Active goroutines: {}", Runtime::active_goroutines());

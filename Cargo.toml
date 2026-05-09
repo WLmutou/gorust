@@ -2,8 +2,14 @@
 name = "gorust"
 version = "0.1.0"
 edition = "2024"
-
-
+authors = ["WLmutou <hhly2013@163.com>"]
+description = "Go-style concurrency in Rust - bringing Go-style concurrency patterns to Rust with familiar primitives like goroutines and channels"
+license = "MIT"
+repository = "https://github.com/WLmutou/gorust"
+homepage = "https://github.com/WLmutou/gorust"
+documentation = "https://docs.rs/gorust"
+keywords = ["concurrency", "goroutines", "channels", "async", "go"]
+categories = ["concurrency", "asynchronous"]
 
 [dependencies]
 crossbeam = "0.8"
@@ -23,6 +29,8 @@ members = [
     "go-macros",
 ]
 
+[badges]
+maintenance = { status = "experimental" }
 
 [dev-dependencies]
 criterion = "0.5"

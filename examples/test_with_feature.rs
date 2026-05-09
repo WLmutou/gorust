@@ -1,11 +1,11 @@
 use gorust::go;
-use gorust::{runtime, make_chan};
+use gorust::{make_chan, runtime};
 
 #[runtime]
 fn main() {
     println!("Testing RGo functionality with macros...");
 
-    go(|| {    
+    go(|| {
         println!("Hello from goroutine 1!");
     });
 

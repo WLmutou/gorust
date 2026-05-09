@@ -1,4 +1,4 @@
-use gorust::{make_chan, select, runtime};
+use gorust::{make_chan, runtime, select};
 
 #[runtime]
 fn main() {

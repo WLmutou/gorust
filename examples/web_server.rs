@@ -1,9 +1,9 @@
 // examples/web_server.rs
-use gorust::runtime;
 use gorust::go;
+use gorust::runtime;
 use gorust::sync::WaitGroup;
-use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 
 #[runtime]
 fn main() -> std::io::Result<()> {
@@ -41,13 +41,13 @@ fn main() -> std::io::Result<()> {
 fn handle_connection(mut stream: TcpStream) {
     let mut buffer = [0; 1024];
     stream.read(&mut buffer).unwrap();
-    
+
     let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
                    <html><body>\
                    <h1>Hello from GoRust</h1>\
                    <p>Served by goroutine</p>\
                    </body></html>";
-    
+
     stream.write(response.as_bytes()).unwrap();
     stream.flush().unwrap();
 }

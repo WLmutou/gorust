@@ -1,12 +1,12 @@
 // examples/web_server_mio_rgo.rs
-use gorust::runtime;
 use gorust::go;
+use gorust::runtime;
+use lazy_static::lazy_static;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
-use std::io::{Read, Write};
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::sync::Mutex;
-use lazy_static::lazy_static;
 
 const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
                           Content-Type: text/html\r\n\
@@ -39,28 +39,30 @@ impl Reactor {
             next_token: 1,
         })
     }
-    
+
     fn register(&mut self, mut stream: TcpStream) -> Token {
         let token = Token(self.next_token);
         self.next_token += 1;
-        
-        self.poll.registry()
+
+        self.poll
+            .registry()
             .register(&mut stream, token, Interest::READABLE)
             .unwrap();
-        
+
         self.streams.insert(token, stream);
         token
     }
-    
+
     fn wait_events(&mut self) -> Vec<Token> {
         self.poll.poll(&mut self.events, None).unwrap();
-        
-        self.events.iter()
+
+        self.events
+            .iter()
             .filter(|e| e.is_readable())
             .map(|e| e.token())
             .collect()
     }
-    
+
     fn remove_stream(&mut self, token: Token) -> Option<TcpStream> {
         self.streams.remove(&token)
     }
@@ -69,17 +71,20 @@ impl Reactor {
 #[runtime]
 fn main() -> std::io::Result<()> {
     println!("=== GoRust + Mio Async Server on :8080 ===");
-    
+
     let mut listener = TcpListener::bind("127.0.0.1:8080".parse().unwrap())?;
     let mut reactor = REACTOR.lock().unwrap();
     let listener_token = Token(0);
-    reactor.poll.registry().register(&mut listener, listener_token, Interest::READABLE)?;
-    
+    reactor
+        .poll
+        .registry()
+        .register(&mut listener, listener_token, Interest::READABLE)?;
+
     // 启动 Reactor 循环
     go(move || {
         reactor_loop(listener);
     });
-    
+
     // 保持运行
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -93,12 +98,12 @@ fn reactor_loop(listener: TcpListener) {
             let mut reactor = REACTOR.lock().unwrap();
             reactor.wait_events()
         };
-        
+
         for token in tokens {
             if token == Token(0) {
                 // 接受新连接
                 let mut reactor = REACTOR.lock().unwrap();
-                   
+
                 while let Ok((stream, _)) = listener.accept() {
                     let token = reactor.register(stream);
                     println!("New connection: {:?}", token);
@@ -109,7 +114,7 @@ fn reactor_loop(listener: TcpListener) {
                     let mut reactor = REACTOR.lock().unwrap();
                     reactor.remove_stream(token)
                 };
-                
+
                 if let Some(stream) = stream {
                     go(move || {
                         handle_connection_rgo(stream);
@@ -122,7 +127,7 @@ fn reactor_loop(listener: TcpListener) {
 
 fn handle_connection_rgo(mut stream: TcpStream) {
     let mut buffer = [0; 1024];
-    
+
     // 读取请求
     match stream.read(&mut buffer) {
         Ok(_) => {

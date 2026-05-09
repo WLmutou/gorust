@@ -38,7 +38,7 @@ fn main() {
 
     // 等待所有 goroutine 完成
     Runtime::wait_for_all();
-    
+
     // 清理运行时
     Runtime::shutdown();
 }

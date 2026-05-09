@@ -1,8 +1,8 @@
 // src/channel.rs
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
-use parking_lot::Mutex;
 
 pub struct Channel<T> {
     sender: ChannelSender<T>,
@@ -24,10 +24,16 @@ impl<T: Send + 'static> Channel<T> {
     pub fn new(capacity: usize) -> Arc<Self> {
         let (sender, receiver) = if capacity > 0 {
             let (sync_sender, sync_receiver) = mpsc::sync_channel(capacity);
-            (ChannelSender::Buffered(sync_sender), ChannelReceiver::Buffered(sync_receiver))
+            (
+                ChannelSender::Buffered(sync_sender),
+                ChannelReceiver::Buffered(sync_receiver),
+            )
         } else {
             let (sender, receiver) = mpsc::channel();
-            (ChannelSender::Unbuffered(sender), ChannelReceiver::Unbuffered(receiver))
+            (
+                ChannelSender::Unbuffered(sender),
+                ChannelReceiver::Unbuffered(receiver),
+            )
         };
 
         Arc::new(Channel {
@@ -59,13 +65,11 @@ impl<T: Send + 'static> Channel<T> {
                 // 对于无缓冲通道，我们无法真正"尝试"发送，因为它总是阻塞
                 // 所以我们在这里只返回错误，表示无法立即发送
                 Err(value)
-            },
-            ChannelSender::Buffered(sender) => {
-                match sender.try_send(value) {
-                    Ok(()) => Ok(()),
-                    Err(mpsc::TrySendError::Full(val)) => Err(val),
-                    Err(mpsc::TrySendError::Disconnected(val)) => Err(val),
-                }
+            }
+            ChannelSender::Buffered(sender) => match sender.try_send(value) {
+                Ok(()) => Ok(()),
+                Err(mpsc::TrySendError::Full(val)) => Err(val),
+                Err(mpsc::TrySendError::Disconnected(val)) => Err(val),
             },
         }
     }
@@ -103,10 +107,8 @@ impl<T: Send + 'static> Channel<T> {
         self.closed.load(Ordering::Acquire)
     }
 
-    pub fn iter(&self) -> ChannelIter<'_,T> {
-        ChannelIter {
-            channel: self,
-        }
+    pub fn iter(&self) -> ChannelIter<'_, T> {
+        ChannelIter { channel: self }
     }
 }
 

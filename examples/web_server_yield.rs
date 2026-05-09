@@ -1,8 +1,8 @@
 // examples/web_server_yield_now.rs - 修复 Content-Length
-use gorust::runtime;
 use gorust::go;
-use std::net::{TcpListener, TcpStream};
+use gorust::runtime;
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 const BODY: &[u8] = b"<html><body>\
@@ -22,7 +22,7 @@ const FULL_RESPONSE: &[u8] = {
     let header_len = RESPONSE_HEADER.len();
     // let content_len_str = format!("Content-Length: {}\r\n\r\n", CONTENT_LENGTH);
     // let content_len_bytes = content_len_str.as_bytes();
-    
+
     // 这个方法在 const 上下文中不工作，所以运行时构建
     b""
 };
@@ -47,10 +47,10 @@ lazy_static::lazy_static! {
 fn main() -> std::io::Result<()> {
     println!("=== GoRust Web Server (Non-blocking) on :8080 ===");
     println!("Content-Length: {}", BODY.len());
-    
+
     let listener = TcpListener::bind("127.0.0.1:8080")?;
     listener.set_nonblocking(true)?;
-    
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -66,17 +66,16 @@ fn main() -> std::io::Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
 
-
 fn handle_connection_nonblocking(mut stream: TcpStream) {
     let _ = stream.set_nonblocking(true);
-    
+
     let mut buffer = [0; 1024];
-    let mut wait_us = 10; 
-    
+    let mut wait_us = 10;
+
     loop {
         match stream.read(&mut buffer) {
             Ok(0) => return,

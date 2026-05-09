@@ -1,20 +1,17 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{
-    parse_macro_input,ItemFn, Type,
-};
+use syn::{ItemFn, Type, parse_macro_input};
 
 mod select_parse;
 use select_parse::parse_select;
 
-
 /// 标记 main 函数使用 GoRust 运行时
-/// 
+///
 /// # Example
 /// ```rust
 /// use log::debug;
 /// use gorust::{runtime, go, make_chan};
-/// 
+///
 /// #[runtime]
 /// fn main() {
 ///     go(|| {
@@ -37,7 +34,7 @@ pub fn runtime(_args: TokenStream, input: TokenStream) -> TokenStream {
     let fn_attrs = &input_fn.attrs;
     let fn_vis = &input_fn.vis;
     let fn_sig = &input_fn.sig;
-    
+
     // 生成包装后的 main 函数
     let expanded = quote! {
         #(#fn_attrs)*
@@ -63,7 +60,7 @@ pub fn runtime(_args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
     };
-    
+
     TokenStream::from(expanded)
 }
 
@@ -72,7 +69,7 @@ pub fn runtime(_args: TokenStream, input: TokenStream) -> TokenStream {
 pub fn make_chan(input: TokenStream) -> TokenStream {
     let parsed_input = input.to_string();
     let parts: Vec<&str> = parsed_input.trim_end_matches(')').split(',').collect();
-    
+
     if parts.len() == 1 {
         // 无缓冲 channel
         let ty = parts[0].trim();
@@ -87,7 +84,8 @@ pub fn make_chan(input: TokenStream) -> TokenStream {
         let ty_parsed: Type = syn::parse_str(ty).expect("Invalid type in make_chan!");
         let size = parts[1].trim();
         // 尝试解析容量为表达式
-        let size_expr: proc_macro2::TokenStream = size.parse().expect("Invalid capacity in make_chan!");
+        let size_expr: proc_macro2::TokenStream =
+            size.parse().expect("Invalid capacity in make_chan!");
         let expanded = quote! {
             ::gorust::Channel::<#ty_parsed>::new(#size_expr)
         };

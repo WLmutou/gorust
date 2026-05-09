@@ -1,5 +1,5 @@
 use gorust::go;
-use gorust::{runtime, make_chan};
+use gorust::{make_chan, runtime};
 
 #[runtime]
 fn main() {

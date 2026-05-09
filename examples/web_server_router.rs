@@ -1,11 +1,11 @@
 // examples/web_server_advanced_router.rs
-use gorust::runtime;
 use gorust::go;
-use std::net::{TcpListener, TcpStream};
-use std::io::{Read, Write};
-use std::time::Duration;
-use std::collections::HashMap;
+use gorust::runtime;
 use lazy_static::lazy_static;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 // ============== 路径参数 ==============
 #[derive(Clone)]
@@ -19,11 +19,11 @@ impl PathParams {
             params: HashMap::new(),
         }
     }
-    
+
     fn get(&self, key: &str) -> Option<&String> {
         self.params.get(key)
     }
-    
+
     fn insert(&mut self, key: String, value: String) {
         self.params.insert(key, value);
     }
@@ -33,24 +33,24 @@ impl PathParams {
 fn build_response(status: &str, content_type: &str, body: &str) -> Vec<u8> {
     let body_bytes = body.as_bytes();
     let mut response = Vec::with_capacity(512);
-    
+
     // 直接写入，避免 format! 的临时值问题
     response.extend_from_slice(b"HTTP/1.1 ");
     response.extend_from_slice(status.as_bytes());
     response.extend_from_slice(b"\r\n");
-    
+
     response.extend_from_slice(b"Content-Type: ");
     response.extend_from_slice(content_type.as_bytes());
     response.extend_from_slice(b"\r\n");
-    
+
     response.extend_from_slice(b"Content-Length: ");
     response.extend_from_slice(body_bytes.len().to_string().as_bytes());
     response.extend_from_slice(b"\r\n");
-    
+
     response.extend_from_slice(b"Connection: close\r\n");
     response.extend_from_slice(b"\r\n");
     response.extend_from_slice(body_bytes);
-    
+
     response
 }
 
@@ -78,7 +78,7 @@ impl AdvancedRouter {
             dynamic_routes: Vec::new(),
         }
     }
-    
+
     fn add_route(&mut self, path: &str, handler: HandlerWithParams) {
         if path.contains(':') {
             self.dynamic_routes.push((path.to_string(), handler));
@@ -86,33 +86,33 @@ impl AdvancedRouter {
             self.routes.insert(path.to_string(), handler);
         }
     }
-    
+
     fn handle(&self, path: &str) -> Vec<u8> {
         // 先查静态路由
         if let Some(handler) = self.routes.get(path) {
             return handler(PathParams::new());
         }
-        
+
         // 再查动态路由
         for (pattern, handler) in &self.dynamic_routes {
             if let Some(params) = self.match_dynamic_route(pattern, path) {
                 return handler(params);
             }
         }
-        
+
         Self::not_found()
     }
-    
+
     fn match_dynamic_route(&self, pattern: &str, path: &str) -> Option<PathParams> {
         let pattern_parts: Vec<&str> = pattern.split('/').collect();
         let path_parts: Vec<&str> = path.split('/').collect();
-        
+
         if pattern_parts.len() != path_parts.len() {
             return None;
         }
-        
+
         let mut params = PathParams::new();
-        
+
         for (p_part, path_part) in pattern_parts.iter().zip(path_parts.iter()) {
             if p_part.starts_with(':') {
                 let key = p_part[1..].to_string();
@@ -121,18 +121,24 @@ impl AdvancedRouter {
                 return None;
             }
         }
-        
+
         Some(params)
     }
-    
+
     fn not_found() -> Vec<u8> {
-        build_response("404 Not Found", "text/html", 
-            "<h1>404 Not Found</h1><p>The requested resource was not found.</p>")
+        build_response(
+            "404 Not Found",
+            "text/html",
+            "<h1>404 Not Found</h1><p>The requested resource was not found.</p>",
+        )
     }
-    
+
     fn method_not_allowed() -> Vec<u8> {
-        build_response("405 Method Not Allowed", "text/html",
-            "<h1>405 Method Not Allowed</h1><p>Only GET method is supported.</p>")
+        build_response(
+            "405 Method Not Allowed",
+            "text/html",
+            "<h1>405 Method Not Allowed</h1><p>Only GET method is supported.</p>",
+        )
     }
 }
 
@@ -235,7 +241,8 @@ fn handle_about(_params: PathParams) -> Vec<u8> {
 
 fn handle_status(_params: PathParams) -> Vec<u8> {
     let mut body = String::new();
-    body.push_str(r#"<html>
+    body.push_str(
+        r#"<html>
         <head><title>Server Status</title></head>
         <body>
             <h1>📊 Server Status</h1>
@@ -252,27 +259,32 @@ fn handle_status(_params: PathParams) -> Vec<u8> {
             </table>
             <p><a href="/">← Back to home</a></p>
         </body>
-    </html>"#);
+    </html>"#,
+    );
     build_html_response(&body)
 }
 
 // ============== 动态路由处理器 ==============
 fn handle_user(params: PathParams) -> Vec<u8> {
     let user_id = params.get("id").map(|s| s.as_str()).unwrap_or("unknown");
-    
+
     let mut body = String::new();
-    body.push_str(r#"<html>
+    body.push_str(
+        r#"<html>
         <body>
             <h1>👤 User Profile</h1>
-            <p><strong>User ID:</strong> "#);
+            <p><strong>User ID:</strong> "#,
+    );
     body.push_str(user_id);
-    body.push_str(r#"</p>
+    body.push_str(
+        r#"</p>
             <p><strong>Page:</strong> Dynamic route handling</p>
             <p>This page demonstrates dynamic routing with path parameters.</p>
             <p><a href="/">← Back to home</a></p>
         </body>
-    </html>"#);
-    
+    </html>"#,
+    );
+
     build_html_response(&body)
 }
 
@@ -280,25 +292,31 @@ fn handle_post(params: PathParams) -> Vec<u8> {
     let year = params.get("year").map(|s| s.as_str()).unwrap_or("unknown");
     let month = params.get("month").map(|s| s.as_str()).unwrap_or("unknown");
     let slug = params.get("slug").map(|s| s.as_str()).unwrap_or("unknown");
-    
+
     let mut body = String::new();
-    body.push_str(r#"<html>
+    body.push_str(
+        r#"<html>
         <body>
             <h1>📝 Blog Post</h1>
-            <p><strong>Date:</strong> "#);
+            <p><strong>Date:</strong> "#,
+    );
     body.push_str(year);
     body.push_str("-");
     body.push_str(month);
-    body.push_str(r#"</p>
-            <p><strong>Slug:</strong> "#);
+    body.push_str(
+        r#"</p>
+            <p><strong>Slug:</strong> "#,
+    );
     body.push_str(slug);
-    body.push_str(r#"</p>
+    body.push_str(
+        r#"</p>
             <p>This is a dynamically routed blog post page.</p>
             <p>The routing pattern <code>/post/:year/:month/:slug</code> matches this URL.</p>
             <p><a href="/">← Back to home</a></p>
         </body>
-    </html>"#);
-    
+    </html>"#,
+    );
+
     build_html_response(&body)
 }
 
@@ -307,7 +325,7 @@ fn parse_request(buffer: &[u8]) -> Option<(String, String)> {
     let request_str = String::from_utf8_lossy(buffer);
     let first_line = request_str.lines().next()?;
     let parts: Vec<&str> = first_line.split_whitespace().collect();
-    
+
     if parts.len() >= 2 {
         let method = parts[0].to_string();
         let path = parts[1].to_string();
@@ -321,18 +339,18 @@ fn parse_request(buffer: &[u8]) -> Option<(String, String)> {
 lazy_static! {
     static ref ROUTER: AdvancedRouter = {
         let mut router = AdvancedRouter::new();
-        
+
         // 静态路由
         router.add_route("/", handle_home);
         router.add_route("/hello", handle_hello);
         router.add_route("/json", handle_json);
         router.add_route("/about", handle_about);
         router.add_route("/status", handle_status);
-        
+
         // 动态路由
         router.add_route("/user/:id", handle_user);
         router.add_route("/post/:year/:month/:slug", handle_post);
-        
+
         router
     };
 }
@@ -340,10 +358,10 @@ lazy_static! {
 // ============== 连接处理 ==============
 fn handle_connection(mut stream: TcpStream) {
     let _ = stream.set_nonblocking(true);
-    
+
     let mut buffer = [0; 4096];
     let mut wait_us = 10;
-    
+
     loop {
         match stream.read(&mut buffer) {
             Ok(0) => return,
@@ -403,10 +421,10 @@ fn main() -> std::io::Result<()> {
     println!("⚡ Performance: ~95,000 req/s | Latency: ~0.59ms");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
-    
+
     let listener = TcpListener::bind("127.0.0.1:8080")?;
     listener.set_nonblocking(true)?;
-    
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -422,6 +440,6 @@ fn main() -> std::io::Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }

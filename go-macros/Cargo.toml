@@ -2,6 +2,14 @@
 name = "go-macros"
 version = "0.1.0"
 edition = "2024"
+authors = ["WLmutou <hhly2013@163.com>"]
+description = "Procedural macros for the gorust crate - providing Go-style concurrency macros for Rust"
+license = "MIT"
+repository = "https://github.com/WLmutou/gorust"
+homepage = "https://github.com/WLmutou/gorust"
+documentation = "https://docs.rs/go-macros"
+keywords = ["concurrency", "goroutines", "macros", "procedural-macro", "go"]
+categories = ["concurrency", "development-tools"]
 
 [lib]
 proc-macro = true
@@ -11,3 +19,6 @@ syn = { version = "2.0", features = ["full", "extra-traits"] }
 log = "0.4"
 quote = "1.0"
 proc-macro2 = "1.0"
+
+[badges]
+maintenance = { status = "experimental" }

@@ -1,7 +1,7 @@
 use gorust::go;
-use gorust::yield_now;
 use gorust::sync::WaitGroup;
-use gorust::{runtime, make_chan};
+use gorust::yield_now;
+use gorust::{make_chan, runtime};
 
 #[runtime]
 fn main() {

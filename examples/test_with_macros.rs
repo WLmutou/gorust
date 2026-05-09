@@ -1,5 +1,5 @@
 use gorust::go;
-use gorust::{runtime, make_chan};
+use gorust::{make_chan, runtime};
 
 #[runtime]
 fn main() {
@@ -24,7 +24,7 @@ fn main() {
     });
 
     let ch_rcv = ch.clone();
-    go(move || {    
+    go(move || {
         let value = ch_rcv.recv().unwrap();
         println!("Received value: {}", value);
     });

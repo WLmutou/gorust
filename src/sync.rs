@@ -1,7 +1,7 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use parking_lot::{Mutex, Condvar};
+use parking_lot::{Condvar, Mutex};
 use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -17,30 +17,30 @@ impl WaitGroup {
             cond: Arc::new((Mutex::new(()), Condvar::new())),
         }
     }
-    
+
     #[inline]
     pub fn add(&self, delta: usize) {
         self.counter.fetch_add(delta, Ordering::Relaxed);
     }
-    
+
     #[inline]
     pub fn done(&self) {
         if self.counter.fetch_sub(1, Ordering::Release) == 1 {
             self.cond.1.notify_all();
         }
     }
-    
+
     pub fn wait(&self) {
         let mut guard = self.cond.0.lock();
         while self.counter.load(Ordering::Acquire) > 0 {
             self.cond.1.wait(&mut guard);
         }
     }
-    
+
     pub fn wait_timeout(&self, timeout: Duration) -> bool {
         let mut guard = self.cond.0.lock();
         let start = Instant::now();
-        
+
         while self.counter.load(Ordering::Acquire) > 0 {
             let elapsed = start.elapsed();
             if elapsed >= timeout {
@@ -55,12 +55,12 @@ impl WaitGroup {
         }
         true
     }
-    
+
     #[inline]
     pub fn len(&self) -> usize {
         self.counter.load(Ordering::Acquire)
     }
-    
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -85,17 +85,17 @@ impl AtomicCounter {
             counter: Arc::new(AtomicUsize::new(0)),
         }
     }
-    
+
     #[inline]
     pub fn inc(&self) {
         self.counter.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     #[inline]
     pub fn dec(&self) {
         self.counter.fetch_sub(1, Ordering::Relaxed);
     }
-    
+
     #[inline]
     pub fn get(&self) -> usize {
         self.counter.load(Ordering::Acquire)
@@ -113,7 +113,7 @@ impl Once {
             done: AtomicBool::new(false),
         }
     }
-    
+
     pub fn call_once<F>(&self, f: F)
     where
         F: FnOnce(),
@@ -121,13 +121,17 @@ impl Once {
         if self.done.load(Ordering::Acquire) {
             return;
         }
-        
+
         // 使用 CAS 确保只执行一次
-        if self.done.compare_exchange(false, true, Ordering::Release, Ordering::Relaxed).is_ok() {
+        if self
+            .done
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
             f();
         }
     }
-    
+
     pub fn is_completed(&self) -> bool {
         self.done.load(Ordering::Acquire)
     }
