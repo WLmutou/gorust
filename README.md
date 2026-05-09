@@ -35,7 +35,7 @@ gorust = "0.1.2" # Replace with actual version
 Here's a simple example demonstrating how to use gorust:
 
 ```rust
-use gorust::{runtime, go, channel};
+use gorust::{runtime, go, channel, sleep};
 
 #[runtime]
 fn main() {
@@ -43,7 +43,7 @@ fn main() {
     
     go(move || {
         // Simulate some work
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        sleep(std::time::Duration::from_millis(100));
         tx.send("Hello from goroutine!".to_string()).unwrap();
     });
     
@@ -53,7 +53,7 @@ fn main() {
 ```
 
 ```rust
-use gorust::{go,runtime, Runtime, yield_now};
+use gorust::{go,runtime, Runtime, yield_now, sleep};
 use gorust::sync::WaitGroup;
 
 #[runtime]
@@ -80,7 +80,7 @@ fn main() {
         let wg_clone = wg.clone();
         go(move || {
             println!("Task {} starting", i);
-            std::thread::sleep(std::time::Duration::from_millis(100 * i));
+            sleep(std::time::Duration::from_secs(i));
             println!("Task {} finished", i);
             wg_clone.done();
         });

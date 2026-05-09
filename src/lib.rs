@@ -11,7 +11,7 @@ pub mod timer;
 pub use channel::{Channel, Sender, Receiver, Selectable};
 pub use go_runtime::Runtime;
 pub use scheduler::{go, yield_now};
-
+pub use timer::{sleep_ms, sleep};
 
 
 // 导出的宏定义

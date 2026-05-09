@@ -51,6 +51,7 @@ pub fn runtime(_args: TokenStream, input: TokenStream) -> TokenStream {
             }));
 
             ::gorust::Runtime::wait_for_all();
+            ::gorust::Runtime::wait_and_shutdown();
             ::gorust::Runtime::shutdown();
 
             match result {
