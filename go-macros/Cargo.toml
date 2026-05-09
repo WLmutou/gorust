@@ -2,7 +2,7 @@
 name = "go-macros"
 version = "0.1.0"
 edition = "2024"
-authors = ["WLmutou <hhly2013@163.com>"]
+authors = ["lijun <1489573464@qq.com>"]
 description = "Procedural macros for the gorust crate - providing Go-style concurrency macros for Rust"
 license = "MIT"
 repository = "https://github.com/WLmutou/gorust"

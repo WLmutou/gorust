@@ -2,7 +2,7 @@
 name = "gorust"
 version = "0.1.0"
 edition = "2024"
-authors = ["WLmutou <hhly2013@163.com>"]
+authors = ["lijun <1489573464@qq.com>"]
 description = "Go-style concurrency in Rust - bringing Go-style concurrency patterns to Rust with familiar primitives like goroutines and channels"
 license = "MIT"
 repository = "https://github.com/WLmutou/gorust"
@@ -22,6 +22,7 @@ env_logger = "0.10"
 
 [dependencies.go-macros]
 path = "./go-macros"
+#version = "0.1.0"  # 在开发时使用路径依赖，在发布前切换到版本依赖
 
 [workspace]
 members = [
