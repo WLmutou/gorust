@@ -2,6 +2,8 @@ use gorust::go;
 use gorust::sync::WaitGroup;
 use gorust::yield_now;
 use gorust::{make_chan, runtime};
+use gorust::channel;
+
 
 #[runtime]
 fn main() {
@@ -127,4 +129,14 @@ fn main() {
 
     wg_select.wait();
     println!("All examples completed!");
+
+    let (tx, rx) = channel::new();
+    go(move || {
+        // Simulate some work
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        tx.send("Hello from goroutine!".to_string()).unwrap();
+    });
+    
+    let message = rx.recv().unwrap();
+    println!("message: {}", message);
 }

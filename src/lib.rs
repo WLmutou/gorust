@@ -7,11 +7,14 @@ pub mod scheduler;
 pub mod sync;
 
 // 导出公共接口
-pub use channel::Channel;
+pub use channel::{Channel, Sender, Receiver, Selectable};
 pub use go_runtime::Runtime;
 pub use scheduler::{go, yield_now};
+
+
 
 // 导出的宏定义
 pub use go_macros::make_chan;
 pub use go_macros::runtime;
 pub use go_macros::select;
+

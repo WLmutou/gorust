@@ -159,7 +159,7 @@ fn generate_non_blocking_select(cases: Vec<SelectCase>) -> TokenStream2 {
 
     quote! {
         {
-            use ::gorust::channel::Selectable;
+            use ::gorust::Selectable;
             #(#checks)*
             #default_body
         }
@@ -253,7 +253,7 @@ fn generate_blocking_select(cases: Vec<SelectCase>) -> TokenStream2 {
     quote! {
         {
             use std::sync::mpsc::channel;
-            use ::gorust::channel::Selectable;
+            use ::gorust::Selectable;
 
             let (__result_tx, __result_rx): (std::sync::mpsc::Sender<(usize, Result<_, ()>)>,
                                             std::sync::mpsc::Receiver<(usize, Result<_, ()>)>) = channel();
