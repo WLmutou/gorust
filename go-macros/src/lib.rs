@@ -5,7 +5,7 @@ use syn::{ItemFn, Type, parse_macro_input};
 mod select_parse;
 use select_parse::parse_select;
 
-/// 标记 main 函数使用 GoRust 运行时
+/// Mark the main function to use the GoRust runtime
 ///
 /// # Example
 /// ```rust
@@ -64,7 +64,7 @@ pub fn runtime(_args: TokenStream, input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// make_chan! 宏 - 创建一个 channel
+/// make_chan! macro - Create a channel
 #[proc_macro]
 pub fn make_chan(input: TokenStream) -> TokenStream {
     let parsed_input = input.to_string();
@@ -93,7 +93,7 @@ pub fn make_chan(input: TokenStream) -> TokenStream {
     }
 }
 
-/// select! 宏 - 多路复用 channel 操作
+/// select! macro - Multiplex channel operations
 #[proc_macro]
 pub fn select(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
