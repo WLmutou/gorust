@@ -248,9 +248,19 @@ dependencies = [
 
 [[package]]
 name = "go-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "log",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "go-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ff287108efc3e824c8f75cfeb2e9e3bf3394cf761c2f8ff9d4f5c8e970f56f9"
+dependencies = [
  "proc-macro2",
  "quote",
  "syn",
@@ -258,12 +268,12 @@ dependencies = [
 
 [[package]]
 name = "gorust"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "criterion",
  "crossbeam",
  "env_logger",
- "go-macros",
+ "go-macros 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "lazy_static",
  "log",
  "mio",
