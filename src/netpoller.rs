@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use parking_lot::Mutex;
-use crossbeam::channel::{unbounded, Sender, Receiver};
+use crate::channel::{unbounded, UnboundedSender, UnboundedReceiver};
 use lazy_static::lazy_static;
 
 pub use mio::Interest;
@@ -39,8 +39,8 @@ pub struct Netpoller {
     pending: HashMap<Token, (EventCallback, std::os::unix::io::RawFd)>,
     next_token: AtomicUsize,
     running: Arc<AtomicBool>,
-    cmd_tx: Sender<Command>,
-    cmd_rx: Receiver<Command>,
+    cmd_tx: UnboundedSender<Command>,
+    cmd_rx: UnboundedReceiver<Command>,
 }
 
 lazy_static! {
@@ -81,7 +81,7 @@ impl Netpoller {
         });
     }
     
-    fn event_loop(cmd_rx: Receiver<Command>, running: Arc<AtomicBool>) {
+    fn event_loop(cmd_rx: UnboundedReceiver<Command>, running: Arc<AtomicBool>) {
         let mut local_events = Events::with_capacity(1024);
         
         while running.load(Ordering::Relaxed) {

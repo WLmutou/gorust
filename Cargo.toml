@@ -12,7 +12,6 @@ keywords = ["concurrency", "goroutines", "channels", "async", "go"]
 categories = ["concurrency", "asynchronous"]
 
 [dependencies]
-crossbeam = "0.8"
 parking_lot = "0.12"
 num_cpus = "1.6"
 lazy_static = "1.4"

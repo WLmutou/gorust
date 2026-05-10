@@ -393,6 +393,11 @@ fn handle_connection(mut stream: TcpStream) {
 // ============== 主函数 ==============
 #[runtime]
 fn main() -> std::io::Result<()> {
+        // 初始化日志
+    // let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warning"))
+    //     .is_test(true)
+    //     .try_init();
+
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║         GoRust Advanced Router Web Server                 ║");
     println!("║                  High-performance HTTP Server              ║");

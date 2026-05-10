@@ -11,7 +11,7 @@ pub mod netpoller;
 pub mod net;
 
 // 导出公共接口
-pub use channel::{Channel, Sender, Receiver, Selectable};
+pub use channel::{Channel, Sender, Receiver, Selectable, unbounded, UnboundedSender, UnboundedReceiver, BoundedQueue, TryRecvError};
 pub use go_runtime::Runtime;
 pub use scheduler::{go, yield_now};
 pub use timer::{sleep_ms, sleep};

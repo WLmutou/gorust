@@ -7,7 +7,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use parking_lot::Mutex;
-use crossbeam::channel::unbounded;
+use crate::channel::unbounded;
 
 /// 异步 TCP 流
 pub struct AsyncTcpStream {

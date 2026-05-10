@@ -2,7 +2,7 @@
 use crate::go_runtime::Runtime;
 use crate::timer;
 use crate::stack::{GoroutineStack, StackAllocator};
-use crossbeam::queue::ArrayQueue;
+use crate::channel::BoundedQueue;
 use lazy_static::lazy_static;
 use log::debug;
 use parking_lot::Mutex;
@@ -135,7 +135,7 @@ pub enum PStatus {
 pub struct P {
     id: usize,
     status: AtomicU8,
-    local_queue: ArrayQueue<Arc<G>>,
+    local_queue: BoundedQueue<Arc<G>>,
     runnext: AtomicPtr<G>,
     work_count: AtomicUsize,
     steals: AtomicUsize,
@@ -146,7 +146,7 @@ impl P {
         P {
             id,
             status: AtomicU8::new(PStatus::Idle as u8),
-            local_queue: ArrayQueue::new(LOCAL_QUEUE_SIZE),
+            local_queue: BoundedQueue::new(LOCAL_QUEUE_SIZE),
             runnext: AtomicPtr::new(ptr::null_mut()),
             work_count: AtomicUsize::new(0),
             steals: AtomicUsize::new(0),

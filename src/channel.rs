@@ -1,5 +1,6 @@
 // src/channel.rs
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -300,4 +301,92 @@ impl<T: Send + 'static> Selectable for Channel<T> {
     fn can_send(&self) -> bool {
         !self.is_closed()
     }
+}
+
+// ============== MPMC 无界通道 ==============
+
+pub struct UnboundedSender<T> {
+    queue: Arc<Mutex<VecDeque<T>>>,
+}
+
+pub struct UnboundedReceiver<T> {
+    queue: Arc<Mutex<VecDeque<T>>>,
+}
+
+impl<T> Clone for UnboundedSender<T> {
+    fn clone(&self) -> Self {
+        UnboundedSender {
+            queue: self.queue.clone(),
+        }
+    }
+}
+
+impl<T> Clone for UnboundedReceiver<T> {
+    fn clone(&self) -> Self {
+        UnboundedReceiver {
+            queue: self.queue.clone(),
+        }
+    }
+}
+
+pub fn unbounded<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
+    let queue = Arc::new(Mutex::new(VecDeque::new()));
+    (
+        UnboundedSender {
+            queue: queue.clone(),
+        },
+        UnboundedReceiver { queue },
+    )
+}
+
+impl<T> UnboundedSender<T> {
+    pub fn send(&self, value: T) -> Result<(), T> {
+        self.queue.lock().push_back(value);
+        Ok(())
+    }
+}
+
+impl<T> UnboundedReceiver<T> {
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        self.queue.lock().pop_front().ok_or(TryRecvError::Empty)
+    }
+}
+
+// ============== 有界 MPMC 队列（替代 crossbeam::queue::ArrayQueue） ==============
+
+pub struct BoundedQueue<T> {
+    queue: Arc<Mutex<VecDeque<T>>>,
+    capacity: usize,
+}
+
+impl<T> BoundedQueue<T> {
+    pub fn new(capacity: usize) -> Self {
+        BoundedQueue {
+            queue: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
+            capacity,
+        }
+    }
+
+    pub fn push(&self, value: T) -> Result<(), T> {
+        let mut q = self.queue.lock();
+        if q.len() >= self.capacity {
+            return Err(value);
+        }
+        q.push_back(value);
+        Ok(())
+    }
+
+    pub fn pop(&self) -> Option<T> {
+        self.queue.lock().pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.lock().len()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TryRecvError {
+    Empty,
+    Disconnected,
 }
