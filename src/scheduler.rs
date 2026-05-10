@@ -87,8 +87,8 @@ impl G {
     // 检查栈使用情况
     pub fn check_stack(&self) -> bool {
         if let Some(stack) = &self.stack {
-            let used = self.stack_used.load(Ordering::Relaxed);
-            if stack.needs_grow(used) {
+            let _used = self.stack_used.load(Ordering::Relaxed);
+            if stack.needs_grow() {
                 // 触发栈扩容
                 return false;
             }

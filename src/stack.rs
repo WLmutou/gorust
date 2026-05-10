@@ -2,7 +2,6 @@
 use std::alloc::{self, Layout};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::mem;
 
 // 栈配置
 const STACK_INITIAL_SIZE: usize = 2048; // 2KB 初始栈
@@ -157,22 +156,22 @@ impl Drop for GoroutineStack {
 
 // 栈溢出检测（使用 guard page 的 Rust 替代方案）
 pub struct StackGuard {
-    limit: usize,
+    _limit: usize,
 }
 
 impl StackGuard {
     pub fn new(stack_bottom: *mut u8) -> Self {
         // 在栈底写入哨兵值
         unsafe {
-            ptr::write_volatile(stack_bottom, 0xDEADBEEFu32);
+            ptr::write_volatile(stack_bottom, 0xDEu8);
         }
-        StackGuard { limit: 0 }
+        StackGuard { _limit: 0 }
     }
 
-    pub fn check(&self, current_sp: *mut u8, stack_bottom: *mut u8) -> bool {
+    pub fn check(&self, _current_sp: *mut u8, stack_bottom: *mut u8) -> bool {
         unsafe {
             let guard_value = ptr::read_volatile(stack_bottom);
-            if guard_value != 0xDEADBEEFu32 {
+            if guard_value != 0xDEu8 {
                 eprintln!("Stack overflow detected!");
                 return false;
             }

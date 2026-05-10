@@ -28,12 +28,13 @@ impl RuntimeState {
         }
     }
 
-    #[inline]
+    #[allow(dead_code)]
     fn inc_goroutine(&self) {
         self.active_goroutines.fetch_add(1, Ordering::Relaxed);
         self.total_goroutines.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     #[inline]
     fn dec_goroutine(&self) {
         self.active_goroutines.fetch_sub(1, Ordering::Relaxed);

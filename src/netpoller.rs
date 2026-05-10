@@ -1,14 +1,17 @@
 // src/netpoller.rs
-use mio::{Events, Interest, Poll, Token, Waker};
+use mio::{Events, Poll, Token, Waker};
 use mio::net::TcpStream as MioTcpStream;
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::FromRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use parking_lot::Mutex;
 use crossbeam::channel::{unbounded, Sender, Receiver};
 use lazy_static::lazy_static;
+
+pub use mio::Interest;
 
 // Token 分配
 const TOKEN_START: usize = 1;
@@ -18,9 +21,10 @@ const WAKER_TOKEN: Token = Token(0);
 pub type EventType = mio::Interest;
 
 /// 事件回调
-type EventCallback = Box<dyn FnOnce(Interest) + Send + 'static>;
+type EventCallback = Box<dyn FnOnce() + Send + 'static>;
 
 /// 命令类型
+#[allow(dead_code)]
 enum Command {
     Register { fd: std::os::unix::io::RawFd, interests: Interest, callback: EventCallback },
     Unregister { token: Token },
@@ -34,7 +38,7 @@ pub struct Netpoller {
     waker: Waker,
     pending: HashMap<Token, (EventCallback, std::os::unix::io::RawFd)>,
     next_token: AtomicUsize,
-    running: AtomicBool,
+    running: Arc<AtomicBool>,
     cmd_tx: Sender<Command>,
     cmd_rx: Receiver<Command>,
 }
@@ -55,7 +59,7 @@ impl Netpoller {
             waker,
             pending: HashMap::new(),
             next_token: AtomicUsize::new(TOKEN_START),
-            running: AtomicBool::new(false),
+            running: Arc::new(AtomicBool::new(false)),
             cmd_tx,
             cmd_rx,
         })
@@ -63,7 +67,7 @@ impl Netpoller {
     
     /// 启动 netpoller 线程
     pub fn start() {
-        let mut np = NETPOLLER.lock();
+        let np = NETPOLLER.lock();
         if np.running.load(Ordering::Relaxed) {
             return;
         }
@@ -78,57 +82,64 @@ impl Netpoller {
     }
     
     fn event_loop(cmd_rx: Receiver<Command>, running: Arc<AtomicBool>) {
-        let mut np = NETPOLLER.lock();
+        let mut local_events = Events::with_capacity(1024);
         
         while running.load(Ordering::Relaxed) {
-            // 处理所有待处理命令
-            while let Ok(cmd) = cmd_rx.try_recv() {
-                match cmd {
-                    Command::Register { fd, interests, callback } => {
-                        let token = Token(np.next_token.fetch_add(1, Ordering::Relaxed));
-                        np.pending.insert(token, (callback, fd));
-                        
-                        // 构建 mio 的 TCP 流并注册
-                        unsafe {
-                            let mut stream = MioTcpStream::from_raw_fd(fd);
-                            if let Err(e) = np.poll.registry().register(&mut stream, token, interests) {
-                                eprintln!("Failed to register fd {}: {}", fd, e);
+            {
+                let mut np = NETPOLLER.lock();
+                
+                while let Ok(cmd) = cmd_rx.try_recv() {
+                    match cmd {
+                        Command::Register { fd, interests, callback } => {
+                            let token = Token(np.next_token.fetch_add(1, Ordering::Relaxed));
+                            np.pending.insert(token, (callback, fd));
+                            
+                            unsafe {
+                                let mut stream = MioTcpStream::from_std(std::net::TcpStream::from_raw_fd(fd));
+                                if let Err(e) = np.poll.registry().register(&mut stream, token, interests) {
+                                    eprintln!("Failed to register fd {}: {}", fd, e);
+                                }
+                                std::mem::forget(stream);
                             }
-                            std::mem::forget(stream); // 防止被 drop
                         }
-                    }
-                    Command::Unregister { token } => {
-                        if let Some((_, fd)) = np.pending.remove(&token) {
-                            // 注销并关闭
-                            let _ = np.poll.registry().deregister(&mut MioTcpStream::from_raw_fd(fd));
+                        Command::Unregister { token } => {
+                            if let Some((_, fd)) = np.pending.remove(&token) {
+                                unsafe {
+                                    let _ = np.poll.registry().deregister(&mut MioTcpStream::from_std(std::net::TcpStream::from_raw_fd(fd)));
+                                }
+                            }
                         }
-                    }
-                    Command::Shutdown => {
-                        return;
+                        Command::Shutdown => {
+                            return;
+                        }
                     }
                 }
-            }
-            
-            // 轮询事件
-            match np.poll.poll(&mut np.events, Some(Duration::from_millis(100))) {
-                Ok(_) => {
-                    for event in np.events.iter() {
-                        match event.token() {
-                            WAKER_TOKEN => continue,
-                            token => {
-                                if let Some((callback, fd)) = np.pending.remove(&token) {
-                                    // 从 pending 中移除后执行回调
-                                    callback(event.interest());
-                                    
-                                    // 如果是单次事件，重新注册（如果需要持续监听，需要额外标志）
-                                    // 这里实现一次性事件
+                
+                std::mem::swap(&mut np.events, &mut local_events);
+                let poll_result = np.poll.poll(&mut local_events, Some(Duration::from_millis(100)));
+                std::mem::swap(&mut np.events, &mut local_events);
+                
+                let mut callbacks: Vec<EventCallback> = Vec::new();
+                match poll_result {
+                    Ok(_) => {
+                        for event in local_events.iter() {
+                            match event.token() {
+                                WAKER_TOKEN => continue,
+                                token => {
+                                    if let Some((callback, _fd)) = np.pending.remove(&token) {
+                                        callbacks.push(callback);
+                                    }
                                 }
                             }
                         }
                     }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => eprintln!("Poll error: {}", e),
                 }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => eprintln!("Poll error: {}", e),
+                
+                for callback in callbacks {
+                    callback();
+                }
             }
         }
     }
@@ -147,7 +158,7 @@ impl Netpoller {
     
     /// 停止 netpoller
     pub fn stop() {
-        let mut np = NETPOLLER.lock();
+        let np = NETPOLLER.lock();
         if np.running.load(Ordering::Relaxed) {
             np.running.store(false, Ordering::Relaxed);
             let _ = np.cmd_tx.send(Command::Shutdown);
@@ -156,5 +167,14 @@ impl Netpoller {
     }
 }
 
-// 重新导出 Interest 作为 EventType
-pub use mio::Interest as EventType;
+pub fn register(fd: std::os::unix::io::RawFd, interests: Interest, callback: EventCallback) {
+    Netpoller::register(fd, interests, callback)
+}
+
+pub fn start() {
+    Netpoller::start();
+}
+
+pub fn stop() {
+    Netpoller::stop();
+}

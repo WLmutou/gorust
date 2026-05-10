@@ -1,25 +1,28 @@
 // src/net.rs
-use crate::netpoller::{self, EventType, Interest};
+use crate::netpoller::{self, Interest};
 use crate::scheduler;
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, SocketAddr};
+use std::net::{TcpStream, TcpListener, SocketAddr};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use parking_lot::Mutex;
-use crossbeam::channel::{unbounded, Sender, Receiver};
+use crossbeam::channel::unbounded;
 
 /// 异步 TCP 流
 pub struct AsyncTcpStream {
     inner: Arc<Mutex<TcpStream>>,
+    #[allow(dead_code)]
     connected: Arc<AtomicBool>,
-    fd: usize, // 用于调试的 ID
+    #[allow(dead_code)]
+    fd: usize,
 }
 
 impl AsyncTcpStream {
     /// 异步连接到远程地址
-    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
+    pub fn connect(addr: SocketAddr) -> io::Result<Self> {
         // 创建标准 TCP 流
-        let mut stream = TcpStream::connect(addr)?;
+        let stream = TcpStream::connect(addr)?;
         
         // 设置为非阻塞模式（纯 Rust 方法）
         stream.set_nonblocking(true)?;
@@ -45,45 +48,39 @@ impl AsyncTcpStream {
     }
     
     /// 异步读取
-    pub async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            // 尝试非阻塞读取
             match self.inner.lock().read(buf) {
                 Ok(n) => return Ok(n),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // 需要等待可读事件
-                    self.wait_readable().await;
-                    // 继续循环，再次尝试读取
+                    self.wait_readable();
                 }
                 Err(e) => return Err(e),
             }
         }
     }
     
-    /// 异步写入
-    pub async fn write(&self, buf: &[u8]) -> io::Result<usize> {
+    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         loop {
             match self.inner.lock().write(buf) {
                 Ok(n) => return Ok(n),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.wait_writable().await;
+                    self.wait_writable();
                 }
                 Err(e) => return Err(e),
             }
         }
     }
     
-    /// 异步写入全部数据
-    pub async fn write_all(&self, mut buf: &[u8]) -> io::Result<()> {
+    pub fn write_all(&self, mut buf: &[u8]) -> io::Result<()> {
         while !buf.is_empty() {
-            let n = self.write(buf).await?;
+            let n = self.write(buf)?;
             buf = &buf[n..];
         }
         Ok(())
     }
     
-    /// 等待可读
-    async fn wait_readable(&self) {
+    fn wait_readable(&self) {
         let (tx, rx) = unbounded();
         let fd = self.inner.lock().as_raw_fd();
         
@@ -91,7 +88,7 @@ impl AsyncTcpStream {
         netpoller::register(
             fd,
             Interest::READABLE,
-            Box::new(move |_| {
+            Box::new(move || {
                 let _ = tx.send(());
             }),
         );
@@ -103,14 +100,14 @@ impl AsyncTcpStream {
     }
     
     /// 等待可写
-    async fn wait_writable(&self) {
+    fn wait_writable(&self) {
         let (tx, rx) = unbounded();
         let fd = self.inner.lock().as_raw_fd();
         
         netpoller::register(
             fd,
             Interest::WRITABLE,
-            Box::new(move |_| {
+            Box::new(move || {
                 let _ = tx.send(());
             }),
         );
@@ -151,7 +148,7 @@ impl AsyncTcpListener {
     }
     
     /// 异步接受连接
-    pub async fn accept(&self) -> io::Result<(AsyncTcpStream, SocketAddr)> {
+    pub fn accept(&self) -> io::Result<(AsyncTcpStream, SocketAddr)> {
         loop {
             match self.inner.lock().accept() {
                 Ok((stream, addr)) => {
@@ -166,22 +163,21 @@ impl AsyncTcpListener {
                     ));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.wait_readable().await;
+                    self.wait_readable();
                 }
                 Err(e) => return Err(e),
             }
         }
     }
     
-    /// 等待可读
-    async fn wait_readable(&self) {
+    fn wait_readable(&self) {
         let (tx, rx) = unbounded();
         let fd = self.inner.lock().as_raw_fd();
         
         netpoller::register(
             fd,
             Interest::READABLE,
-            Box::new(move |_| {
+            Box::new(move || {
                 let _ = tx.send(());
             }),
         );
