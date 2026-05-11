@@ -27,7 +27,7 @@ Or when it's published on crates.io:
 
 ```toml
 [dependencies]
-gorust = "0.1.2" # Replace with actual version
+gorust = "x.x.x" # Replace with actual version
 ```
 
 ## Usage

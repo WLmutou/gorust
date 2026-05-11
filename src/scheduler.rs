@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 const LOCAL_QUEUE_SIZE: usize = 256;
 const WORK_STEALING_ATTEMPTS: usize = 2;
 const MAX_SPIN_ITERATIONS: usize = 100;
-const SLEEP_DURATION: Duration = Duration::from_micros(50);
+const MIN_SLEEP_US: u64 = 50;
+const MAX_SLEEP_US: u64 = 100000;
 
 // ============= 添加 thread_local! 宏 ===========
 thread_local! {
@@ -442,7 +443,9 @@ impl Scheduler {
                     thread::yield_now();
                 } else {
                     SCHEDULER.stats.total_sleeps.fetch_add(1, Ordering::Relaxed);
-                    thread::sleep(SLEEP_DURATION);
+                    spin_count += 1;
+                    let sleep_us = MIN_SLEEP_US.saturating_mul(1 << ((spin_count - MAX_SPIN_ITERATIONS).min(11))).min(MAX_SLEEP_US);
+                    thread::sleep(Duration::from_micros(sleep_us));
                 }
             }
         }

@@ -255,17 +255,6 @@ dependencies = [
 
 [[package]]
 name = "go-macros"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ff287108efc3e824c8f75cfeb2e9e3bf3394cf761c2f8ff9d4f5c8e970f56f9"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "go-macros"
 version = "0.1.2"
 dependencies = [
  "proc-macro2",
@@ -280,7 +269,7 @@ dependencies = [
  "criterion",
  "ctrlc",
  "env_logger",
- "go-macros 0.1.1",
+ "go-macros",
  "lazy_static",
  "log",
  "mio",
