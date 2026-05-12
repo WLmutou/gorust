@@ -263,13 +263,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "go-macros"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1decba9d0fe8925b1d3497f3a57e2aca4c07e839f92625b8a79507b6047880b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "gorust"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "criterion",
  "ctrlc",
  "env_logger",
- "go-macros",
+ "go-macros 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "lazy_static",
  "log",
  "mio",

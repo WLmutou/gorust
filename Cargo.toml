@@ -15,7 +15,7 @@ categories = ["concurrency", "asynchronous"]
 parking_lot = "0.12"
 num_cpus = "1.6"
 lazy_static = "1.4"
-mio = { version = "0.8", features = ["os-poll", "net"] }
+mio = { version = "0.8", features = ["os-poll", "net", "os-ext"] }
 log = "0.4"
 env_logger = "0.10"
 ctrlc = "3.4.5"

@@ -286,7 +286,6 @@ impl Scheduler {
     //     debug!("   Starting {} workers (GOMAXPROCS={})", m_count, p_count);
 
     //     timer::init_timer_thread();
-
     //     for i in 0..m_count {
     //         let p = SCHEDULER.processors[i % p_count].clone();
 
@@ -306,6 +305,7 @@ impl Scheduler {
         debug!("   Starting {} workers (GOMAXPROCS={})", m_count, p_count);
 
         timer::init_timer_thread();
+        crate::netpoller::start();
 
         for i in 0..m_count {
             let p = SCHEDULER.processors[i % p_count].clone();
@@ -458,6 +458,7 @@ impl Scheduler {
     pub fn shutdown() {
         SCHEDULER.running.store(false, Ordering::Relaxed);
         timer::shutdown_timer();
+        crate::netpoller::stop();
     }
 
     pub fn yield_now() {

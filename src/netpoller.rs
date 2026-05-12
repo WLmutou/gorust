@@ -1,9 +1,9 @@
 // src/netpoller.rs
-use mio::{Events, Poll, Token, Waker};
-use mio::net::TcpStream as MioTcpStream;
+pub use mio::{Events, Interest, Poll, Token, Waker};
+use mio::unix::SourceFd;
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::FromRawFd;
+use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -11,102 +11,73 @@ use parking_lot::Mutex;
 use crate::channel::{unbounded, UnboundedSender, UnboundedReceiver};
 use lazy_static::lazy_static;
 
-pub use mio::Interest;
-
-// Token 分配
 const TOKEN_START: usize = 1;
 const WAKER_TOKEN: Token = Token(0);
 
-/// 事件类型（兼容层）
-pub type EventType = mio::Interest;
+pub type EventType = Interest;
 
-/// 事件回调
 type EventCallback = Box<dyn FnOnce() + Send + 'static>;
 
-/// 命令类型
 #[allow(dead_code)]
 enum Command {
-    Register { fd: std::os::unix::io::RawFd, interests: Interest, callback: EventCallback },
+    Register { fd: RawFd, interests: Interest, callback: EventCallback },
     Unregister { token: Token },
     Shutdown,
 }
 
-/// Netpoller 核心
-pub struct Netpoller {
-    poll: Poll,
-    events: Events,
+struct NetpollerInner {
+    poll: Option<Poll>,
+    cmd_rx: Option<UnboundedReceiver<Command>>,
     waker: Waker,
-    pending: HashMap<Token, (EventCallback, std::os::unix::io::RawFd)>,
+    pending: HashMap<Token, (EventCallback, RawFd)>,
     next_token: AtomicUsize,
     running: Arc<AtomicBool>,
     cmd_tx: UnboundedSender<Command>,
-    cmd_rx: UnboundedReceiver<Command>,
 }
 
 lazy_static! {
-    static ref NETPOLLER: Mutex<Netpoller> = Mutex::new(Netpoller::new().unwrap());
+    static ref NETPOLLER: Mutex<NetpollerInner> = Mutex::new(NetpollerInner::new().unwrap());
 }
 
-impl Netpoller {
+impl NetpollerInner {
     fn new() -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = Waker::new(poll.registry(), WAKER_TOKEN)?;
         let (cmd_tx, cmd_rx) = unbounded();
-        
-        Ok(Netpoller {
-            poll,
-            events: Events::with_capacity(1024),
+
+        Ok(NetpollerInner {
+            poll: Some(poll),
+            cmd_rx: Some(cmd_rx),
             waker,
             pending: HashMap::new(),
             next_token: AtomicUsize::new(TOKEN_START),
             running: Arc::new(AtomicBool::new(false)),
             cmd_tx,
-            cmd_rx,
         })
     }
-    
-    /// 启动 netpoller 线程
-    pub fn start() {
-        let np = NETPOLLER.lock();
-        if np.running.load(Ordering::Relaxed) {
-            return;
-        }
-        np.running.store(true, Ordering::Relaxed);
-        
-        let cmd_rx = np.cmd_rx.clone();
-        let running = np.running.clone();
-        
-        std::thread::spawn(move || {
-            Self::event_loop(cmd_rx, running);
-        });
-    }
-    
-    fn event_loop(cmd_rx: UnboundedReceiver<Command>, running: Arc<AtomicBool>) {
-        let mut local_events = Events::with_capacity(1024);
-        
+
+    fn event_loop(mut poll: Poll, cmd_rx: UnboundedReceiver<Command>, running: Arc<AtomicBool>) {
+        let mut events = Events::with_capacity(1024);
+
         while running.load(Ordering::Relaxed) {
             {
                 let mut np = NETPOLLER.lock();
-                
+
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         Command::Register { fd, interests, callback } => {
                             let token = Token(np.next_token.fetch_add(1, Ordering::Relaxed));
                             np.pending.insert(token, (callback, fd));
-                            
-                            unsafe {
-                                let mut stream = MioTcpStream::from_std(std::net::TcpStream::from_raw_fd(fd));
-                                if let Err(e) = np.poll.registry().register(&mut stream, token, interests) {
-                                    eprintln!("Failed to register fd {}: {}", fd, e);
-                                }
-                                std::mem::forget(stream);
+
+                            let mut source_fd = SourceFd(&fd);
+                            if let Err(e) = poll.registry().register(&mut source_fd, token, interests) {
+                                eprintln!("NETPOLLER: Failed to register fd {}: {}", fd, e);
                             }
                         }
                         Command::Unregister { token } => {
                             if let Some((_, fd)) = np.pending.remove(&token) {
-                                unsafe {
-                                    let _ = np.poll.registry().deregister(&mut MioTcpStream::from_std(std::net::TcpStream::from_raw_fd(fd)));
-                                }
+                                let mut source_fd = SourceFd(&fd);
+                                let _ = poll.registry().deregister(&mut source_fd);
                             }
                         }
                         Command::Shutdown => {
@@ -114,49 +85,62 @@ impl Netpoller {
                         }
                     }
                 }
-                
-                std::mem::swap(&mut np.events, &mut local_events);
-                let poll_result = np.poll.poll(&mut local_events, Some(Duration::from_millis(100)));
-                std::mem::swap(&mut np.events, &mut local_events);
-                
-                let mut callbacks: Vec<EventCallback> = Vec::new();
-                match poll_result {
-                    Ok(_) => {
-                        for event in local_events.iter() {
-                            match event.token() {
-                                WAKER_TOKEN => continue,
-                                token => {
-                                    if let Some((callback, _fd)) = np.pending.remove(&token) {
-                                        callbacks.push(callback);
-                                    }
-                                }
+            }
+
+            match poll.poll(&mut events, Some(Duration::from_millis(100))) {
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    eprintln!("NETPOLLER: Poll error: {}", e);
+                    continue;
+                }
+            }
+
+            let mut callbacks: Vec<EventCallback> = Vec::new();
+            {
+                let mut np = NETPOLLER.lock();
+                for event in events.iter() {
+                    match event.token() {
+                        WAKER_TOKEN => continue,
+                        token => {
+                            if let Some((callback, fd)) = np.pending.remove(&token) {
+                                callbacks.push(callback);
+                                let mut source_fd = SourceFd(&fd);
+                                let _ = poll.registry().deregister(&mut source_fd);
                             }
                         }
                     }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => eprintln!("Poll error: {}", e),
                 }
-                
-                for callback in callbacks {
-                    callback();
-                }
+            }
+
+            for callback in callbacks {
+                callback();
             }
         }
     }
-    
-    /// 注册事件（公开 API）
-    pub fn register(fd: std::os::unix::io::RawFd, interests: Interest, callback: EventCallback) {
+
+    pub fn start() {
+        let mut np = NETPOLLER.lock();
+        if np.running.load(Ordering::Relaxed) {
+            return;
+        }
+        np.running.store(true, Ordering::Relaxed);
+
+        let poll = np.poll.take().expect("Netpoller already started");
+        let cmd_rx = np.cmd_rx.take().expect("Netpoller already started");
+        let running = np.running.clone();
+
+        std::thread::spawn(move || {
+            Self::event_loop(poll, cmd_rx, running);
+        });
+    }
+
+    pub fn register(fd: RawFd, interests: Interest, callback: EventCallback) {
         let np = NETPOLLER.lock();
         let _ = np.cmd_tx.send(Command::Register { fd, interests, callback });
-    }
-    
-    /// 唤醒事件循环
-    pub fn wake() {
-        let np = NETPOLLER.lock();
         let _ = np.waker.wake();
     }
-    
-    /// 停止 netpoller
+
     pub fn stop() {
         let np = NETPOLLER.lock();
         if np.running.load(Ordering::Relaxed) {
@@ -167,14 +151,14 @@ impl Netpoller {
     }
 }
 
-pub fn register(fd: std::os::unix::io::RawFd, interests: Interest, callback: EventCallback) {
-    Netpoller::register(fd, interests, callback)
+pub fn register(fd: RawFd, interests: Interest, callback: EventCallback) {
+    NetpollerInner::register(fd, interests, callback)
 }
 
 pub fn start() {
-    Netpoller::start();
+    NetpollerInner::start();
 }
 
 pub fn stop() {
-    Netpoller::stop();
+    NetpollerInner::stop();
 }
