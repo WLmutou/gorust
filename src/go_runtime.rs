@@ -47,8 +47,6 @@ impl RuntimeState {
     fn total_count(&self) -> usize {
         self.total_goroutines.load(Ordering::Relaxed)
     }
-
-    
 }
 
 pub struct Runtime;
@@ -59,6 +57,18 @@ impl Runtime {
         debug!("🚀 GoRust Runtime v0.2.0 initialized");
         debug!("   GOMAXPROCS={}", num_cpus::get());
         scheduler::Scheduler::init();
+
+        // 注册 Ctrl-C 信号处理
+        Self::setup_signal_handler();
+    }
+
+    /// 设置 Ctrl-C 信号处理
+    fn setup_signal_handler() {
+        let _ = ctrlc::set_handler(|| {
+            debug!("📡 Received Ctrl-C signal, initiating shutdown...");
+            scheduler::shutdown();
+            std::process::exit(0);
+        });
     }
 
     /// 等待所有 goroutine 完成

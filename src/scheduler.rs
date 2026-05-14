@@ -317,11 +317,6 @@ impl Scheduler {
                 })
                 .unwrap();
         }
-        
-        // 注册 atexit 处理函数
-        ctrlc::set_handler(|| {
-            Scheduler::shutdown();
-        }).ok();
     }
 
     fn get_runnable_g(p: &P) -> Option<Arc<G>> {
