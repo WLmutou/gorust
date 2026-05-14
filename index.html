@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>gorust — Go-style concurrency in Rust</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --surface: #111b2e;
+      --border: #1e2d4d;
+      --text: #eaf0ff;
+      --muted: #94a3c7;
+      --accent: #6ee7b7;
+      --accent2: #93c5fd;
+      --radius: 14px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.18), transparent 60%),
+                  radial-gradient(1000px 500px at 110% 0%, rgba(16,185,129,.18), transparent 60%),
+                  var(--bg);
+      color: var(--text);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* NAV */
+    .nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 22px;
+      background: rgba(11,18,32,.72);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(30,45,77,.9);
+    }
+    .nav-brand {
+      display: flex; align-items: center; gap: 10px;
+      font-weight: 700; letter-spacing: .3px;
+    }
+    .nav-brand .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: linear-gradient(180deg, var(--accent), var(--accent2));
+      box-shadow: 0 0 10px rgba(110,231,183,.55);
+    }
+    .nav-links {
+      display: flex; gap: 14px;
+    }
+    .nav-links a {
+      color: var(--muted); text-decoration: none; font-size: 13.5px;
+      padding: 6px 10px; border-radius: 8px; transition: .2s;
+    }
+    .nav-links a:hover { color: #fff; background: rgba(255,255,255,.06); }
+
+    /* SECTIONS */
+    .sections {
+      height: 100%;
+      overflow: hidden;
+      scroll-behavior: smooth;
+    }
+    section {
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 90px 22px 40px;
+    }
+    .inner {
+      width: 100%;
+      max-width: 1080px;
+    }
+
+    /* HERO */
+    .hero h1 {
+      font-size: clamp(36px, 6vw, 62px);
+      line-height: 1.08;
+      font-weight: 800;
+      background: linear-gradient(180deg, #eaf0ff 30%, #93c5fd);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero h1 span { -webkit-text-fill-color: var(--accent); }
+    .hero p {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: clamp(15px, 2vw, 18px);
+      line-height: 1.6;
+      max-width: 680px;
+    }
+    .hero-actions {
+      margin-top: 22px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      border: 1px solid transparent;
+      transition: .2s;
+    }
+    .btn-primary {
+      background: linear-gradient(180deg, rgba(110,231,183,.18), rgba(110,231,183,.10));
+      border-color: rgba(110,231,183,.35);
+      color: #d1fae5;
+    }
+    .btn-primary:hover { background: rgba(110,231,183,.22); }
+    .btn-outline {
+      background: rgba(255,255,255,.03);
+      border-color: rgba(255,255,255,.12);
+      color: #c7d4f5;
+    }
+    .btn-outline:hover { background: rgba(255,255,255,.07); }
+
+    /* SECTION TITLE */
+    .section-title {
+      font-size: clamp(22px, 3.5vw, 32px);
+      font-weight: 800;
+      margin-bottom: 14px;
+    }
+    .section-desc {
+      color: var(--muted);
+      font-size: 15.5px;
+      line-height: 1.65;
+      max-width: 760px;
+    }
+
+    /* CODE BLOCK */
+    .codewrap {
+      margin-top: 18px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .codehead {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(17,27,46,.92);
+    }
+    .codehead .tag {
+      font-size: 12.5px;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+    .codehead button {
+      appearance: none;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.04);
+      color: var(--muted);
+      font-size: 12px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: .2s;
+    }
+    .codehead button:hover { background: rgba(255,255,255,.09); color: #fff; }
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 13.5px;
+      line-height: 1.7;
+      color: #c7d4f5;
+      tab-size: 4;
+    }
+    pre .k { color: #93c5fd; }
+    pre .f { color: #e0d6ff; }
+    pre .s { color: #6ee7b7; }
+    pre .c { color: #64748b; }
+    pre .n { color: #fbcfe8; }
+
+    /* FEATURES GRID */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, rgba(17,27,46,.92), rgba(17,27,46,.82));
+      padding: 16px;
+      transition: .2s;
+    }
+    .card:hover { border-color: rgba(110,231,183,.35); }
+    .card h3 {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .card p {
+      font-size: 13.5px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    /* STATS */
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 18px;
+    }
+    .stat {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: rgba(17,27,46,.82);
+      padding: 14px 16px;
+      min-width: 180px;
+    }
+    .stat .num {
+      font-size: 22px;
+      font-weight: 800;
+      color: #eaf0ff;
+    }
+    .stat .lbl {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    /* FOOTER */
+    .footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13.5px;
+      line-height: 1.7;
+    }
+    .footer a { color: var(--accent); }
+
+    /* PAGINATION DOTS */
+    .pager {
+      position: fixed;
+      right: 18px;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .pager button {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,.18);
+      background: transparent;
+      cursor: pointer;
+      transition: .2s;
+    }
+    .pager button.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 10px rgba(110,231,183,.55);
+    }
+
+    /* SCROLLBAR */
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(148,163,199,.25); border-radius: 99px; }
+  </style>
+</head>
+<body>
+
+  <!-- NAV -->
+  <div class="nav">
+    <div class="nav-brand">
+      <div class="dot"></div>
+      <div>gorust</div>
+    </div>
+    <div class="nav-links">
+      <a href="#hero">Home</a>
+      <a href="#about">About</a>
+      <a href="#install">Install</a>
+      <a href="#usage">Usage</a>
+      <a href="#features">Features</a>
+    </div>
+  </div>
+
+  <!-- PAGER DOTS -->
+  <div class="pager" id="pager"></div>
+
+  <!-- SECTIONS -->
+  <div class="sections" id="sections">
+
+    <!-- HERO -->
+    <section id="hero">
+      <div class="inner hero">
+        <h1>Go-style concurrency <br/><span>in Rust</span></h1>
+        <p>
+          <b>gorust</b> is an experimental library that brings Go-like concurrency patterns to Rust:
+          goroutines, channels, lightweight scheduling, and a familiar API for developers
+          moving between Go and Rust or wanting Go-style concurrency in Rust projects.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/WLmutou/gorust" target="_blank">
+            View on GitHub
+          </a>
+          <a class="btn btn-outline" href="#usage">See Usage</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ABOUT -->
+    <section id="about">
+      <div class="inner">
+        <h2 class="section-title">About</h2>
+        <p class="section-desc">
+          The primary goal of <b>gorust</b> is to provide Rust developers with familiar concurrency primitives
+          similar to those found in Go, especially Goroutines and channels, enabling lightweight concurrent
+          programming experiences and reducing the learning curve when transitioning between the two languages.
+        </p>
+        <div class="stats">
+          <div class="stat">
+            <div class="num">Rust</div>
+            <div class="lbl">Language</div>
+          </div>
+          <div class="stat">
+            <div class="num">MIT</div>
+            <div class="lbl">License</div>
+          </div>
+          <div class="stat">
+            <div class="num">Experimental</div>
+            <div class="lbl">Status</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- INSTALL -->
+    <section id="install">
+      <div class="inner">
+        <h2 class="section-title">Installation</h2>
+        <p class="section-desc">
+          Add <b>gorust</b> as a dependency via git (or from crates.io once published).
+        </p>
+
+        <div class="codewrap">
+          <div class="codehead">
+            <div class="tag">Cargo.toml</div>
+            <button onclick="copy(this, 'install-code')">Copy</button>
+          </div>
+          <pre id="install-code"><span class="k">[dependencies]</span>
+<span class="n">gorust</span> <span class="k">=</span> { <span class="n">git</span> <span class="k">=</span> <span class="s">"https://github.com/WLmutou/gorust.git"</span> }</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- USAGE -->
+    <section id="usage">
+      <div class="inner">
+        <h2 class="section-title">Quick Start</h2>
+        <p class="section-desc">
+          Use <code style="font-family:var(--mono);color:#93c5fd;">#[runtime]</code>, <code style="font-family:var(--mono);color:#93c5fd;">go</code>,
+          <code style="font-family:var(--mono);color:#93c5fd;">channel</code>, <code style="font-family:var(--mono);color:#93c5fd;">WaitGroup</code> and more.
+        </p>
+
+        <div class="codewrap">
+          <div class="codehead">
+            <div class="tag">main.rs</div>
+            <button onclick="copy(this, 'usage-code')">Copy</button>
+          </div>
+          <pre id="usage-code"><span class="k">use</span> <span class="n">gorust</span>::{<span class="n">runtime</span>, <span class="n">go</span>, <span class="n">channel</span>, <span class="n">sleep</span>};
+
+<span class="k">#[runtime]</span>
+<span class="k">fn</span> <span class="f">main</span>() {
+  <span class="k">let</span> (<span class="n">tx</span>, <span class="n">rx</span>) <span class="k">=</span> <span class="n">channel</span>::<span class="f">new</span>();
+
+  <span class="n">go</span>(<span class="k">move</span> || {
+    <span class="n">sleep</span>(std::time::Duration::<span class="f">from_millis</span>(100));
+    <span class="n">tx</span>.<span class="f">send</span>(<span class="s">"Hello from goroutine!"</span>.<span class="f">to_string</span>()).<span class="f">unwrap</span>();
+  });
+
+  <span class="k">let</span> <span class="n">message</span> <span class="k">=</span> <span class="n">rx</span>.<span class="f">recv</span>().<span class="f">unwrap</span>();
+  <span class="n">println</span>!(<span class="s">"{}"</span>, <span class="n">message</span>);
+}</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section id="features">
+      <div class="inner">
+        <h2 class="section-title">Features</h2>
+        <p class="section-desc">
+          Planned and in-progress capabilities to make Go-style concurrency feel natural in Rust.
+        </p>
+
+        <div class="features">
+          <div class="card">
+            <h3>Goroutines</h3>
+            <p>Go-style goroutines implementation in Rust with lightweight scheduling.</p>
+          </div>
+          <div class="card">
+            <h3>Channels</h3>
+            <p>Channel communication between concurrent tasks, similar to Go’s chan.</p>
+          </div>
+          <div class="card">
+            <h3>Select-like</h3>
+            <p>Provide select-like functionality similar to Go (on the roadmap).</p>
+          </div>
+          <div class="card">
+            <h3>WaitGroup</h3>
+            <p>Synchronization helper so one task can wait for multiple goroutines.</p>
+          </div>
+          <div class="card">
+            <h3>Familiar API</h3>
+            <p>API designed to feel intuitive for developers experienced with Go concurrency.</p>
+          </div>
+          <div class="card">
+            <h3>Examples &amp; Tests</h3>
+            <p>Comprehensive examples, docs, tests and benchmarks planned in the roadmap.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <section id="footer">
+      <div class="inner footer">
+        <p>
+          <b>gorust</b> · Go-style concurrency in Rust<br/>
+          <a href="https://github.com/WLmutou/gorust" target="_blank">github.com/WLmutou/gorust</a>
+        </p>
+        <p style="margin-top:8px;">MIT License</p>
+      </div>
+    </section>
+
+  </div>
+
+  <script>
+    const sectionsEl = document.getElementById('sections');
+    const sectionEls = Array.from(sectionsEl.querySelectorAll('section'));
+    const pager = document.getElementById('pager');
+    let current = 0;
+
+    // build dots
+    sectionEls.forEach((_, i) => {
+      const btn = document.createElement('button');
+      btn.setAttribute('aria-label', 'Go to section ' + (i + 1));
+      btn.addEventListener('click', () => goTo(i));
+      pager.appendChild(btn);
+    });
+    const dots = Array.from(pager.children);
+
+    function activate() {
+      dots.forEach((d, i) => d.classList.toggle('active', i === current));
+    }
+    function goTo(i) {
+      current = Math.max(0, Math.min(sectionEls.length - 1, i));
+      sectionEls[current].scrollIntoView({ behavior: 'smooth' });
+      activate();
+    }
+
+    // wheel -> snap
+    let wheelCooldown = false;
+    sectionsEl.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      if (wheelCooldown) return;
+      wheelCooldown = true;
+      if (e.deltaY > 0) goTo(current + 1);
+      else if (e.deltaY < 0) goTo(current - 1);
+      setTimeout(() => wheelCooldown = false, 420);
+    }, { passive: false });
+
+    // keyboard
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); goTo(current + 1); }
+      if (e.key === 'ArrowUp') { e.preventDefault(); goTo(current - 1); }
+    });
+
+    // detect current section by scroll position
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          const idx = sectionEls.indexOf(entry.target);
+          if (idx !== -1) { current = idx; activate(); }
+        }
+      }
+    }, { threshold: 0.55 });
+    sectionEls.forEach((s) => observer.observe(s));
+
+    activate();
+
+    // copy
+    function copy(btn, id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      navigator.clipboard.writeText(el.textContent).then(() => {
+        btn.textContent = 'Copied';
+        setTimeout(() => btn.textContent = 'Copy', 1200);
+      });
+    }
+  </script>
+</body>
+</html>
