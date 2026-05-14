@@ -1,4 +1,4 @@
-// src/macros/select_parse.rs - 修复括号匹配问题
+// src/macros/select_parse.rs - 支持 Go 风格的 select 语法
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -12,9 +12,15 @@ pub struct SelectInput {
     pub cases: Vec<SelectCase>,
 }
 
+pub enum SelectCaseKind {
+    Recv(Pat, Expr),
+    Send(Expr, Expr),
+    Timeout(Expr),
+    Default,
+}
+
 pub struct SelectCase {
-    pub recv: Option<(Pat, Expr)>,
-    pub send: Option<(Expr, Expr)>,
+    pub kind: SelectCaseKind,
     pub body: Expr,
 }
 
@@ -38,26 +44,40 @@ impl Parse for SelectInput {
 fn parse_select_case(input: ParseStream) -> syn::Result<SelectCase> {
     let lookahead = input.lookahead1();
 
-    // 检查是否是 default case
     if lookahead.peek(Token![default]) {
         input.parse::<Token![default]>()?;
         input.parse::<FatArrow>()?;
         let body = input.parse::<Expr>()?;
 
         return Ok(SelectCase {
-            recv: None,
-            send: None,
+            kind: SelectCaseKind::Default,
             body,
         });
     }
 
-    // 尝试解析模式 (pattern <- channel)
-    let fork = input.fork();
+    if lookahead.peek(syn::Ident) {
+        let fork = input.fork();
+        if let Ok(ident) = fork.parse::<syn::Ident>() {
+            if ident == "timeout" || ident == "After" {
+                input.parse::<syn::Ident>()?;
+                input.parse::<Token![!]>()?;
+                let content;
+                syn::parenthesized!(content in input);
+                let duration = content.parse::<Expr>()?;
+                input.parse::<FatArrow>()?;
+                let body = input.parse::<Expr>()?;
 
-    // 使用 parse_single 方法来解析模式，注意传递引用
+                return Ok(SelectCase {
+                    kind: SelectCaseKind::Timeout(duration),
+                    body,
+                });
+            }
+        }
+    }
+
+    let fork = input.fork();
     if let Ok(_pat) = Pat::parse_single(&fork) {
         if fork.peek(Token![<-]) {
-            // 确实是接收操作
             let pat = Pat::parse_single(input)?;
             input.parse::<Token![<-]>()?;
             let channel = input.parse::<Expr>()?;
@@ -65,19 +85,15 @@ fn parse_select_case(input: ParseStream) -> syn::Result<SelectCase> {
             let body = input.parse::<Expr>()?;
 
             return Ok(SelectCase {
-                recv: Some((pat, channel)),
-                send: None,
+                kind: SelectCaseKind::Recv(pat, channel),
                 body,
             });
         }
     }
 
-    // 尝试解析发送操作 (channel.send(value))
-    let expr_span = input.span(); // 保存原始输入的位置，以便错误报告
     let expr = input.parse::<Expr>()?;
 
     if let Expr::MethodCall(method) = &expr {
-        // 使用引用避免移动
         if method.method == "send" {
             input.parse::<FatArrow>()?;
             let body = input.parse::<Expr>()?;
@@ -88,17 +104,15 @@ fn parse_select_case(input: ParseStream) -> syn::Result<SelectCase> {
             })?;
 
             return Ok(SelectCase {
-                recv: None,
-                send: Some((channel, value)),
+                kind: SelectCaseKind::Send(channel, value),
                 body,
             });
         }
     }
 
-    // 使用保存的位置来报告错误
     Err(syn::Error::new(
-        expr_span,
-        "Expected pattern <- channel or channel.send(value)",
+        input.span(),
+        "Expected: pat <- chan => body, chan.send(val) => body, timeout!(dur) => body, or default => body",
     ))
 }
 
@@ -110,18 +124,22 @@ pub fn parse_select(input_str: String) -> Result<TokenStream2, String> {
             let has_default = select_input
                 .cases
                 .iter()
-                .any(|c| c.recv.is_none() && c.send.is_none());
-            Ok(generate_select_impl(select_input.cases, has_default))
+                .any(|c| matches!(c.kind, SelectCaseKind::Default));
+            let has_timeout = select_input
+                .cases
+                .iter()
+                .any(|c| matches!(c.kind, SelectCaseKind::Timeout(_)));
+            Ok(generate_select_impl(select_input.cases, has_default, has_timeout))
         }
         Err(err) => Err(format!("Parse error: {}", err)),
     }
 }
 
-fn generate_select_impl(cases: Vec<SelectCase>, has_default: bool) -> TokenStream2 {
+fn generate_select_impl(cases: Vec<SelectCase>, has_default: bool, has_timeout: bool) -> TokenStream2 {
     if has_default {
         generate_non_blocking_select(cases)
     } else {
-        generate_blocking_select(cases)
+        generate_blocking_select(cases, has_timeout)
     }
 }
 
@@ -130,8 +148,8 @@ fn generate_non_blocking_select(cases: Vec<SelectCase>) -> TokenStream2 {
     let mut default_body = None;
 
     for case in cases {
-        match (case.recv, case.send) {
-            (Some((pat, chan)), None) => {
+        match case.kind {
+            SelectCaseKind::Recv(pat, chan) => {
                 let body = case.body;
                 checks.push(quote! {
                     if let Ok(val) = #chan.try_recv() {
@@ -141,7 +159,7 @@ fn generate_non_blocking_select(cases: Vec<SelectCase>) -> TokenStream2 {
                     }
                 });
             }
-            (None, Some((chan, val))) => {
+            SelectCaseKind::Send(chan, val) => {
                 let body = case.body;
                 checks.push(quote! {
                     if #chan.try_send(#val).is_ok() {
@@ -150,129 +168,129 @@ fn generate_non_blocking_select(cases: Vec<SelectCase>) -> TokenStream2 {
                     }
                 });
             }
-            (None, None) => {
+            SelectCaseKind::Default => {
                 default_body = Some(case.body);
             }
-            _ => unreachable!(),
+            SelectCaseKind::Timeout(_) => {
+                continue;
+            }
         }
     }
 
     quote! {
         {
-            use ::gorust::Selectable;
             #(#checks)*
             #default_body
         }
     }
 }
 
-// 修复：使用一个简单的select实现，基于通道等待
-fn generate_blocking_select(cases: Vec<SelectCase>) -> TokenStream2 {
-    let recv_tokens: Vec<_> = cases
-        .iter()
-        .enumerate()
-        .filter_map(|(i, case)| {
-            if let Some((_pat, chan)) = &case.recv {
-                let _body = &case.body;
-                Some(quote! {
+fn generate_blocking_select(cases: Vec<SelectCase>, _has_timeout: bool) -> TokenStream2 {
+    let mut recv_tokens = Vec::new();
+    let mut send_tokens = Vec::new();
+    let mut timeout_tokens = Vec::new();
+    let mut branches = Vec::new();
+    let mut case_counter = 0usize;
+
+    for case in &cases {
+        match &case.kind {
+            SelectCaseKind::Recv(pat, chan) => {
+                let body = &case.body;
+                let case_id = case_counter;
+                recv_tokens.push(quote! {
                     {
                         let __tx = __result_tx.clone();
                         let __chan = #chan.clone();
-                        let __case_id = #i;
+                        let __case_id = #case_id;
                         ::gorust::go(move || {
                             if let Some(__val) = __chan.recv() {
-                                // 发送case id和接收到的值
-                                let _ = __tx.send((__case_id, Ok(__val)));
+                                let _ = __tx.send((__case_id, Box::new(__val)));
                             }
                         });
                     }
-                })
-            } else {
-                None
+                });
+                branches.push((case_id, pat.clone(), body.clone(), true));
+                case_counter += 1;
             }
-        })
-        .collect();
-
-    let send_tokens: Vec<_> = cases
-        .iter()
-        .enumerate()
-        .filter_map(|(i, case)| {
-            if let Some((chan, val)) = &case.send {
-                let _body = &case.body;
-                Some(quote! {
+            SelectCaseKind::Send(chan, val) => {
+                let body = &case.body;
+                let case_id = case_counter;
+                send_tokens.push(quote! {
                     {
                         let __tx = __result_tx.clone();
                         let __chan = #chan.clone();
                         let __val = #val.clone();
-                        let __case_id = #i;
+                        let __case_id = #case_id;
                         ::gorust::go(move || {
                             if __chan.send(__val).is_ok() {
-                                // 发送case id和单位值
-                                let _ = __tx.send((__case_id, Err(())));
+                                let _ = __tx.send((__case_id, Box::new(())));
                             }
                         });
                     }
-                })
-            } else {
-                None
+                });
+                branches.push((case_id, syn::parse_quote!(_), body.clone(), false));
+                case_counter += 1;
             }
-        })
-        .collect();
-
-    let branches: Vec<_> = cases
-        .iter()
-        .enumerate()
-        .map(|(i, case)| {
-            match (&case.recv, &case.send) {
-                (Some((pat, _)), None) => {
-                    let body = &case.body;
-                    quote! {
-                        #i => {
-                            if let Ok(__val) = __result_val {
-                                let #pat = __val;
-                                #body
-                            }
-                        }
+            SelectCaseKind::Timeout(duration) => {
+                let body = &case.body;
+                let case_id = case_counter;
+                let dur = duration;
+                timeout_tokens.push(quote! {
+                    {
+                        let __tx = __result_tx.clone();
+                        let __case_id = #case_id;
+                        ::gorust::go(move || {
+                            std::thread::sleep(#dur);
+                            let _ = __tx.send((__case_id, Box::new(())));
+                        });
                     }
-                }
-                (None, Some(_)) => {
-                    let body = &case.body;
-                    quote! {
-                        #i => {
-                            let _ = __result_val; // 忽略发送结果
-                            #body
-                        }
-                    }
-                }
-                _ => quote! {}, // 这种情况不应该发生
+                });
+                branches.push((case_id, syn::parse_quote!(_), body.clone(), false));
+                case_counter += 1;
             }
-        })
-        .collect();
+            SelectCaseKind::Default => {
+                continue;
+            }
+        }
+    }
 
-    // 修复类型推断问题：明确指定通道元素的类型
+    let branch_matches: Vec<_> = branches.iter().map(|(case_id, pat, body, is_recv)| {
+        if *is_recv {
+            quote! {
+                #case_id => {
+                    let #pat = *Box::<dyn std::any::Any>::downcast(__val).unwrap();
+                    #body
+                }
+            }
+        } else {
+            quote! {
+                #case_id => {
+                    #body
+                }
+            }
+        }
+    }).collect();
+
     quote! {
         {
             use std::sync::mpsc::channel;
-            use ::gorust::Selectable;
 
-            let (__result_tx, __result_rx): (std::sync::mpsc::Sender<(usize, Result<_, ()>)>,
-                                            std::sync::mpsc::Receiver<(usize, Result<_, ()>)>) = channel();
+            let (__result_tx, __result_rx): (
+                std::sync::mpsc::Sender<(usize, Box<dyn std::any::Any>)>,
+                std::sync::mpsc::Receiver<(usize, Box<dyn std::any::Any>)>
+            ) = channel();
 
-            // 启动所有接收操作的goroutine
             #(#recv_tokens)*
-
-            // 启动所有发送操作的goroutine
             #(#send_tokens)*
+            #(#timeout_tokens)*
 
-            // 接收第一个完成的结果
-            if let Ok((__case_id, __result_val)) = __result_rx.recv() {
+            if let Ok((__case_id, __val)) = __result_rx.recv() {
                 match __case_id {
-                    #(#branches)*
+                    #(#branch_matches)*
                     _ => {}
                 }
             }
 
-            // 清理资源
             drop(__result_tx);
         }
     }
@@ -332,6 +350,21 @@ mod tests {
             },
             ch3.send(42) => {
                 println!("Sent to ch3");
+            }
+        "#;
+
+        let result = parse_select(input.to_string());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_select_with_timeout() {
+        let input = r#"
+            val <- ch1 => {
+                println!("Got: {}", val);
+            },
+            timeout!(std::time::Duration::from_secs(2)) => {
+                println!("超时！取消等待");
             }
         "#;
 

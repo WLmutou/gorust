@@ -1,6 +1,6 @@
 [package]
 name = "gorust"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 authors = ["lijun <1489573464@qq.com>"]
 description = "Go-style concurrency in Rust - bringing Go-style concurrency patterns to Rust with familiar primitives like goroutines and channels"
@@ -36,6 +36,10 @@ maintenance = { status = "experimental" }
 
 [dev-dependencies]
 criterion = "0.5"
+
+[[bench]]
+name = "benchmarks"
+harness = false
 
 
 [profile.release]

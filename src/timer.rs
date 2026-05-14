@@ -1,23 +1,24 @@
-// src/timer.rs
 use crate::scheduler::{G, GStatus, Scheduler};
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
-use std::collections::binary_heap::BinaryHeap;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-// ============== 定时器任务 ==============
+const TIMER_BUCKET_COUNT: usize = 64;
+const TIMER_TICK_MS: u64 = 10;
+
 struct TimerEntry {
     wake_time: Instant,
-    g_id: usize,
     g: Arc<G>,
+    bucket_id: usize,
 }
 
 impl PartialEq for TimerEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.g_id == other.g_id
+        Arc::ptr_eq(&self.g, &other.g)
     }
 }
 
@@ -31,20 +32,37 @@ impl PartialOrd for TimerEntry {
 
 impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.wake_time.cmp(&other.wake_time) {
-            std::cmp::Ordering::Equal => self.g_id.cmp(&other.g_id),
-            ord => ord.reverse(),
+        other.wake_time.cmp(&self.wake_time)
+    }
+}
+
+struct TimerBucket {
+    heap: Mutex<BinaryHeap<TimerEntry>>,
+}
+
+impl TimerBucket {
+    fn new() -> Self {
+        TimerBucket {
+            heap: Mutex::new(BinaryHeap::new()),
         }
     }
 }
 
-// ============== 全局定时器 ==============
 lazy_static! {
-    static ref TIMER: Mutex<BinaryHeap<TimerEntry>> = Mutex::new(BinaryHeap::new());
+    static ref TIMER_BUCKETS: Vec<TimerBucket> = {
+        (0..TIMER_BUCKET_COUNT)
+            .map(|_| TimerBucket::new())
+            .collect()
+    };
     static ref TIMER_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
+    static ref TIMER_ENTRY_COUNT: AtomicUsize = AtomicUsize::new(0);
 }
 
-/// 初始化定时器线程
+fn get_bucket_id(wake_time: Instant) -> usize {
+    let millis = wake_time.duration_since(Instant::now()).as_millis() as usize;
+    (millis / TIMER_TICK_MS as usize) % TIMER_BUCKET_COUNT
+}
+
 pub fn init_timer_thread() {
     if TIMER_THREAD_RUNNING.swap(true, Ordering::SeqCst) {
         return;
@@ -58,65 +76,54 @@ pub fn init_timer_thread() {
         .unwrap();
 }
 
-/// 定时器工作线程
 fn timer_worker() {
+    let mut current_bucket = 0;
+
     loop {
         let now = Instant::now();
         let mut to_wake = Vec::new();
 
-        {
-            let mut timer = TIMER.lock();
-            while let Some(entry) = timer.peek() {
-                if entry.wake_time <= now {
-                    let entry = timer.pop().unwrap();
-                    to_wake.push(entry.g);
-                } else {
-                    break;
-                }
+        let bucket = &TIMER_BUCKETS[current_bucket];
+        let mut heap = bucket.heap.lock();
+
+        while let Some(entry) = heap.peek() {
+            if entry.wake_time <= now {
+                let entry = heap.pop().unwrap();
+                TIMER_ENTRY_COUNT.fetch_sub(1, Ordering::Relaxed);
+                to_wake.push(entry.g);
+            } else {
+                break;
             }
         }
 
-        // 唤醒到期的 G
+        drop(heap);
+
         for g in to_wake {
             let status = g.status();
             if status == GStatus::Waiting {
-                if cfg!(debug_assertions) {
-                    log::debug!("[Timer] Waking G{}", g.id);
-                }
                 g.set_status(GStatus::Runnable);
                 Scheduler::wake_g(g);
             }
         }
 
-        // 检查是否应该退出
-        if !Scheduler::is_running() && TIMER.lock().is_empty() {
-            break;
-        }
+        current_bucket = (current_bucket + 1) % TIMER_BUCKET_COUNT;
 
-        // 计算下次唤醒时间
-        let next_wake = {
-            let timer = TIMER.lock();
-            timer.peek().map(|entry| entry.wake_time)
-        };
-
-        match next_wake {
-            Some(wake_time) => {
-                let now = Instant::now();
-                if wake_time > now {
-                    let sleep_dur = wake_time - now;
-                    thread::sleep(sleep_dur.min(Duration::from_millis(10)));
-                }
+        if !Scheduler::is_running() {
+            let mut total = 0;
+            for bucket in TIMER_BUCKETS.iter() {
+                total += bucket.heap.lock().len();
             }
-            None => {
-                thread::sleep(Duration::from_millis(10));
+            if total == 0 {
+                break;
             }
         }
+
+        thread::sleep(Duration::from_millis(TIMER_TICK_MS));
     }
 
     TIMER_THREAD_RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// 让当前 Goroutine 睡眠
 pub fn sleep(duration: Duration) {
     if duration.is_zero() {
         Scheduler::yield_now();
@@ -124,66 +131,45 @@ pub fn sleep(duration: Duration) {
     }
 
     let wake_time = Instant::now() + duration;
+    let bucket_id = get_bucket_id(wake_time);
 
     match Scheduler::current_g() {
         Some(g) => {
-            let g_id = g.id;
-
-            if cfg!(debug_assertions) {
-                log::debug!(
-                    "[G{}] Sleeping for {:?}, will wake at {:?}",
-                    g_id,
-                    duration,
-                    wake_time
-                );
-            }
-
-            g.set_status(GStatus::Waiting);
-
             let entry = TimerEntry {
                 wake_time,
-                g_id,
                 g: g.clone(),
+                bucket_id,
             };
 
-            TIMER.lock().push(entry);
+            g.set_status(GStatus::Waiting);
+            TIMER_ENTRY_COUNT.fetch_add(1, Ordering::Relaxed);
 
-            if cfg!(debug_assertions) {
-                log::debug!("[G{}] Registered in timer, pending: {}", g_id, TIMER.lock().len());
-            }
+            let bucket = &TIMER_BUCKETS[bucket_id];
+            bucket.heap.lock().push(entry);
 
-            // 等待被唤醒
             while g.status() == GStatus::Waiting {
                 Scheduler::yield_now();
                 thread::yield_now();
             }
-
-            if cfg!(debug_assertions) {
-                log::debug!("[G{}] Woken up, new status: {:?}", g_id, g.status());
-            }
         }
         None => {
-            // 不在 goroutine 上下文中，使用系统 sleep
-            if cfg!(debug_assertions) {
-                log::debug!("Sleep called outside goroutine context, using system sleep");
-            }
             thread::sleep(duration);
         }
     }
 }
 
-/// 睡眠指定毫秒
 pub fn sleep_ms(ms: u64) {
     sleep(Duration::from_millis(ms));
 }
 
-/// 清理定时器
 pub fn shutdown_timer() {
-    TIMER.lock().clear();
+    for bucket in TIMER_BUCKETS.iter() {
+        bucket.heap.lock().clear();
+    }
+    TIMER_ENTRY_COUNT.store(0, Ordering::Relaxed);
     TIMER_THREAD_RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// 获取待处理任务数
 pub fn pending_timer_count() -> usize {
-    TIMER.lock().len()
+    TIMER_ENTRY_COUNT.load(Ordering::Relaxed)
 }

@@ -1,151 +1,276 @@
-// src/channel.rs
+use crate::scheduler::{Scheduler, G, GStatus};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendError<T> {
+    Disconnected(T),
+    Full(T),
+}
+
+impl<T> fmt::Display for SendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SendError::Disconnected(_) => write!(f, "channel disconnected"),
+            SendError::Full(_) => write!(f, "channel full"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvError {
+    Disconnected,
+    Empty,
+}
+
+impl fmt::Display for RecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecvError::Disconnected => write!(f, "channel disconnected"),
+            RecvError::Empty => write!(f, "channel empty"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvError {
+    Empty,
+    Disconnected,
+}
+
+impl fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TryRecvError::Empty => write!(f, "channel empty"),
+            TryRecvError::Disconnected => write!(f, "channel disconnected"),
+        }
+    }
+}
+
+struct ChannelInner<T> {
+    buffer: VecDeque<T>,
+    capacity: usize,
+    closed: bool,
+    send_waiters: VecDeque<Arc<G>>,
+    recv_waiters: VecDeque<Arc<G>>,
+}
 
 pub struct Sender<T> {
-    sender: ChannelSender<T>,
-    closed: Arc<AtomicBool>,
+    inner: Arc<Mutex<ChannelInner<T>>>,
 }
 
 pub struct Receiver<T> {
-    receiver: Arc<Mutex<ChannelReceiver<T>>>,
-    closed: Arc<AtomicBool>,
+    inner: Arc<Mutex<ChannelInner<T>>>,
 }
 
 pub struct Channel<T> {
-    sender: ChannelSender<T>,
-    receiver: Arc<Mutex<ChannelReceiver<T>>>,
-    closed: AtomicBool,
+    inner: Arc<Mutex<ChannelInner<T>>>,
 }
 
-enum ChannelSender<T> {
-    Unbuffered(mpsc::Sender<T>),
-    Buffered(mpsc::SyncSender<T>),
+impl<T> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Sender {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
-enum ChannelReceiver<T> {
-    Unbuffered(mpsc::Receiver<T>),
-    Buffered(mpsc::Receiver<T>),
+impl<T> Clone for Receiver<T> {
+    fn clone(&self) -> Self {
+        Receiver {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
-// 创建新通道的函数，返回独立的Sender和Receiver
+impl<T> Clone for Channel<T> {
+    fn clone(&self) -> Self {
+        Channel {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 pub fn new<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
     _new(0)
 }
-
 
 pub fn new_with_capacity<T: Send + 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     _new(capacity)
 }
 
+pub fn unbounded<T: Send + 'static>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
+    let inner = Arc::new(Mutex::new(UnboundedInner {
+        buffer: VecDeque::new(),
+        closed: false,
+        recv_waiters: VecDeque::new(),
+    }));
+    (
+        UnboundedSender { inner: inner.clone() },
+        UnboundedReceiver { inner },
+    )
+}
 
-/// 内部创建通道的辅助函数
 fn _new<T: Send + 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-    let (sender, receiver) = if capacity > 0 {
-        let (sync_sender, sync_receiver) = mpsc::sync_channel(capacity);
-        (
-            ChannelSender::Buffered(sync_sender),
-            ChannelReceiver::Buffered(sync_receiver),
-        )
-    } else {
-        let (sender, receiver) = mpsc::channel();
-        (
-            ChannelSender::Unbuffered(sender),
-            ChannelReceiver::Unbuffered(receiver),
-        )
-    };
-
-    let closed = Arc::new(AtomicBool::new(false));
-    
-    let sender = Sender {
-        sender,
-        closed: closed.clone(),
-    };
-    
-    let receiver = Receiver {
-        receiver: Arc::new(Mutex::new(receiver)),
-        closed,
-    };
-    
-    (sender, receiver)
+    let inner = Arc::new(Mutex::new(ChannelInner {
+        buffer: VecDeque::with_capacity(capacity),
+        capacity,
+        closed: false,
+        send_waiters: VecDeque::new(),
+        recv_waiters: VecDeque::new(),
+    }));
+    (
+        Sender {
+            inner: inner.clone(),
+        },
+        Receiver { inner },
+    )
 }
 
 impl<T: Send + 'static> Sender<T> {
-    pub fn send(&self, value: T) -> Result<(), T> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(value);
-        }
+    pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+        loop {
+            let mut inner = self.inner.lock();
 
-        match &self.sender {
-            ChannelSender::Unbuffered(sender) => sender.send(value).map_err(|e| e.0),
-            ChannelSender::Buffered(sender) => sender.send(value).map_err(|e| e.0),
+            if inner.closed {
+                return Err(SendError::Disconnected(value));
+            }
+
+            if inner.capacity > 0 && inner.buffer.len() < inner.capacity {
+                inner.buffer.push_back(value);
+                if let Some(waiter) = inner.recv_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        waiter.set_status(GStatus::Runnable);
+                        Scheduler::wake_g(waiter);
+                    }
+                }
+                return Ok(());
+            } else if inner.capacity == 0 {
+                if let Some(waiter) = inner.recv_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        waiter.set_status(GStatus::Runnable);
+                        Scheduler::wake_g(waiter);
+                        return Ok(());
+                    }
+                }
+
+                if let Some(current_g) = Scheduler::current_g() {
+                    current_g.set_status(GStatus::Waiting);
+                    inner.send_waiters.push_back(current_g.clone());
+                    drop(inner);
+                    while current_g.status() == GStatus::Waiting {
+                        Scheduler::yield_now();
+                    }
+                    continue;
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Err(SendError::Full(value));
+            }
         }
     }
 
-    // 添加 try_send 方法
-    pub fn try_send(&self, value: T) -> Result<(), T> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(value);
+    pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
+        let mut inner = self.inner.lock();
+
+        if inner.closed {
+            return Err(SendError::Disconnected(value));
         }
 
-        match &self.sender {
-            ChannelSender::Unbuffered(_sender) => {
-                // 对于无缓冲通道，我们无法真正"尝试"发送，因为它总是阻塞
-                // 所以我们在这里只返回错误，表示无法立即发送
-                Err(value)
+        if inner.capacity > 0 && inner.buffer.len() < inner.capacity {
+            inner.buffer.push_back(value);
+            if let Some(waiter) = inner.recv_waiters.pop_front() {
+                if waiter.status() == GStatus::Waiting {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
             }
-            ChannelSender::Buffered(sender) => match sender.try_send(value) {
-                Ok(()) => Ok(()),
-                Err(mpsc::TrySendError::Full(val)) => Err(val),
-                Err(mpsc::TrySendError::Disconnected(val)) => Err(val),
-            },
+            Ok(())
+        } else {
+            Err(SendError::Full(value))
+        }
+    }
+
+    pub fn close(&self) {
+        let mut inner = self.inner.lock();
+        if !inner.closed {
+            inner.closed = true;
+            while let Some(waiter) = inner.recv_waiters.pop_front() {
+                if waiter.status() == GStatus::Waiting {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
+            }
         }
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
-    }
-    
-    pub fn close(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.inner.lock().closed
     }
 }
 
 impl<T: Send + 'static> Receiver<T> {
-    pub fn recv(&self) -> Option<T> {
+    pub fn recv(&self) -> Result<T, RecvError> {
         loop {
-            match self.try_recv() {
-                Ok(value) => return Some(value),
-                Err(mpsc::TryRecvError::Empty) => {
-                    if self.closed.load(Ordering::Acquire) {
-                        return None;
+            let mut inner = self.inner.lock();
+
+            if let Some(value) = inner.buffer.pop_front() {
+                if let Some(waiter) = inner.send_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        waiter.set_status(GStatus::Runnable);
+                        Scheduler::wake_g(waiter);
                     }
-                    std::thread::yield_now();
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.close();
-                    return None;
+                return Ok(value);
+            }
+
+            if inner.closed {
+                return Err(RecvError::Disconnected);
+            }
+
+            if let Some(current_g) = Scheduler::current_g() {
+                current_g.set_status(GStatus::Waiting);
+                inner.recv_waiters.push_back(current_g.clone());
+                drop(inner);
+                while current_g.status() == GStatus::Waiting {
+                    Scheduler::yield_now();
                 }
+            } else {
+                drop(inner);
+                std::thread::yield_now();
             }
         }
     }
 
-    pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
-        match &*self.receiver.lock() {
-            ChannelReceiver::Unbuffered(receiver) => receiver.try_recv(),
-            ChannelReceiver::Buffered(receiver) => receiver.try_recv(),
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        let mut inner = self.inner.lock();
+
+        if let Some(value) = inner.buffer.pop_front() {
+            if let Some(waiter) = inner.send_waiters.pop_front() {
+                if waiter.status() == GStatus::Waiting {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
+            }
+            return Ok(value);
+        }
+
+        if inner.closed {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
         }
     }
 
-    pub fn close(&self) {
-        self.closed.store(true, Ordering::Release);
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().closed
     }
 
-    pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+    pub fn has_data(&self) -> bool {
+        !self.inner.lock().buffer.is_empty()
     }
 
     pub fn iter(&self) -> ReceiverIter<'_, T> {
@@ -153,92 +278,153 @@ impl<T: Send + 'static> Receiver<T> {
     }
 }
 
-// 为Channel保持原有的实现
 impl<T: Send + 'static> Channel<T> {
     pub fn new(capacity: usize) -> Arc<Self> {
-        let (sender, receiver) = if capacity > 0 {
-            let (sync_sender, sync_receiver) = mpsc::sync_channel(capacity);
-            (
-                ChannelSender::Buffered(sync_sender),
-                ChannelReceiver::Buffered(sync_receiver),
-            )
-        } else {
-            let (sender, receiver) = mpsc::channel();
-            (
-                ChannelSender::Unbuffered(sender),
-                ChannelReceiver::Unbuffered(receiver),
-            )
-        };
-
-        Arc::new(Channel {
-            sender,
-            receiver: Arc::new(Mutex::new(receiver)),
-            closed: AtomicBool::new(false),
-        })
+        let inner = Arc::new(Mutex::new(ChannelInner {
+            buffer: VecDeque::with_capacity(capacity),
+            capacity,
+            closed: false,
+            send_waiters: VecDeque::new(),
+            recv_waiters: VecDeque::new(),
+        }));
+        Arc::new(Channel { inner })
     }
 
-    pub fn send(&self, value: T) -> Result<(), T> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(value);
-        }
-
-        match &self.sender {
-            ChannelSender::Unbuffered(sender) => sender.send(value).map_err(|e| e.0),
-            ChannelSender::Buffered(sender) => sender.send(value).map_err(|e| e.0),
-        }
-    }
-
-    // 添加 try_send 方法
-    pub fn try_send(&self, value: T) -> Result<(), T> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(value);
-        }
-
-        match &self.sender {
-            ChannelSender::Unbuffered(_sender) => {
-                // 对于无缓冲通道，我们无法真正"尝试"发送，因为它总是阻塞
-                // 所以我们在这里只返回错误，表示无法立即发送
-                Err(value)
-            }
-            ChannelSender::Buffered(sender) => match sender.try_send(value) {
-                Ok(()) => Ok(()),
-                Err(mpsc::TrySendError::Full(val)) => Err(val),
-                Err(mpsc::TrySendError::Disconnected(val)) => Err(val),
-            },
-        }
-    }
-
-    pub fn recv(&self) -> Option<T> {
+    pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         loop {
-            match self.try_recv() {
-                Ok(value) => return Some(value),
-                Err(mpsc::TryRecvError::Empty) => {
-                    if self.closed.load(Ordering::Acquire) {
-                        return None;
+            let mut inner = self.inner.lock();
+
+            if inner.closed {
+                return Err(SendError::Disconnected(value));
+            }
+
+            if inner.capacity > 0 && inner.buffer.len() < inner.capacity {
+                inner.buffer.push_back(value);
+                if let Some(waiter) = inner.recv_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        waiter.set_status(GStatus::Runnable);
+                        Scheduler::wake_g(waiter);
                     }
-                    std::thread::yield_now();
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.close();
-                    return None;
+                return Ok(());
+            } else if inner.capacity == 0 {
+                if let Some(waiter) = inner.recv_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        waiter.set_status(GStatus::Runnable);
+                        Scheduler::wake_g(waiter);
+                        return Ok(());
+                    }
                 }
+
+                if let Some(current_g) = Scheduler::current_g() {
+                    current_g.set_status(GStatus::Waiting);
+                    inner.send_waiters.push_back(current_g.clone());
+                    drop(inner);
+                    while current_g.status() == GStatus::Waiting {
+                        Scheduler::yield_now();
+                    }
+                    continue;
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Err(SendError::Full(value));
             }
         }
     }
 
-    pub fn try_recv(&self) -> Result<T, mpsc::TryRecvError> {
-        match &*self.receiver.lock() {
-            ChannelReceiver::Unbuffered(receiver) => receiver.try_recv(),
-            ChannelReceiver::Buffered(receiver) => receiver.try_recv(),
+    pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
+        let mut inner = self.inner.lock();
+
+        if inner.closed {
+            return Err(SendError::Disconnected(value));
+        }
+
+        if inner.capacity > 0 && inner.buffer.len() < inner.capacity {
+            inner.buffer.push_back(value);
+            if let Some(waiter) = inner.recv_waiters.pop_front() {
+                if waiter.status() == GStatus::Waiting {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
+            }
+            Ok(())
+        } else {
+            Err(SendError::Full(value))
+        }
+    }
+
+    pub fn recv(&self) -> Result<T, RecvError> {
+        loop {
+            let mut inner = self.inner.lock();
+
+            if let Some(value) = inner.buffer.pop_front() {
+                if let Some(waiter) = inner.send_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        waiter.set_status(GStatus::Runnable);
+                        Scheduler::wake_g(waiter);
+                    }
+                }
+                return Ok(value);
+            }
+
+            if inner.closed {
+                return Err(RecvError::Disconnected);
+            }
+
+            if let Some(current_g) = Scheduler::current_g() {
+                current_g.set_status(GStatus::Waiting);
+                inner.recv_waiters.push_back(current_g.clone());
+                drop(inner);
+                while current_g.status() == GStatus::Waiting {
+                    Scheduler::yield_now();
+                }
+            } else {
+                drop(inner);
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        let mut inner = self.inner.lock();
+
+        if let Some(value) = inner.buffer.pop_front() {
+            if let Some(waiter) = inner.send_waiters.pop_front() {
+                if waiter.status() == GStatus::Waiting {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
+            }
+            return Ok(value);
+        }
+
+        if inner.closed {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
         }
     }
 
     pub fn close(&self) {
-        self.closed.store(true, Ordering::Release);
+        let mut inner = self.inner.lock();
+        if !inner.closed {
+            inner.closed = true;
+            while let Some(waiter) = inner.recv_waiters.pop_front() {
+                if waiter.status() == GStatus::Waiting {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
+            }
+        }
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
+        self.inner.lock().closed
+    }
+
+    pub fn has_data(&self) -> bool {
+        !self.inner.lock().buffer.is_empty()
     }
 
     pub fn iter(&self) -> ChannelIter<'_, T> {
@@ -254,7 +440,7 @@ impl<'a, T: Send + 'static> Iterator for ChannelIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.channel.recv()
+        self.channel.recv().ok()
     }
 }
 
@@ -266,15 +452,16 @@ impl<'a, T: Send + 'static> Iterator for ReceiverIter<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.recv()
+        self.receiver.recv().ok()
     }
 }
 
-// 为任何类型实现Drop trait，因为close方法不依赖于T的任何特定trait
 impl<T> Drop for Channel<T> {
     fn drop(&mut self) {
-        // 直接操作原子布尔值，而不调用需要Send trait的方法
-        self.closed.store(true, Ordering::Release);
+        let mut inner = self.inner.lock();
+        if !inner.closed {
+            inner.closed = true;
+        }
     }
 }
 
@@ -285,7 +472,7 @@ pub trait Selectable {
 
 impl<T: Send + 'static> Selectable for Receiver<T> {
     fn can_recv(&self) -> bool {
-        !self.is_closed() && self.try_recv().is_ok()
+        self.has_data() && !self.is_closed()
     }
 
     fn can_send(&self) -> bool {
@@ -295,7 +482,7 @@ impl<T: Send + 'static> Selectable for Receiver<T> {
 
 impl<T: Send + 'static> Selectable for Channel<T> {
     fn can_recv(&self) -> bool {
-        !self.is_closed() && self.try_recv().is_ok()
+        self.has_data() && !self.is_closed()
     }
 
     fn can_send(&self) -> bool {
@@ -303,20 +490,34 @@ impl<T: Send + 'static> Selectable for Channel<T> {
     }
 }
 
-// ============== MPMC 无界通道 ==============
+impl<T: Send + 'static> Selectable for Sender<T> {
+    fn can_recv(&self) -> bool {
+        false
+    }
+
+    fn can_send(&self) -> bool {
+        !self.is_closed()
+    }
+}
+
+struct UnboundedInner<T> {
+    buffer: VecDeque<T>,
+    closed: bool,
+    recv_waiters: VecDeque<Arc<G>>,
+}
 
 pub struct UnboundedSender<T> {
-    queue: Arc<Mutex<VecDeque<T>>>,
+    inner: Arc<Mutex<UnboundedInner<T>>>,
 }
 
 pub struct UnboundedReceiver<T> {
-    queue: Arc<Mutex<VecDeque<T>>>,
+    inner: Arc<Mutex<UnboundedInner<T>>>,
 }
 
 impl<T> Clone for UnboundedSender<T> {
     fn clone(&self) -> Self {
         UnboundedSender {
-            queue: self.queue.clone(),
+            inner: self.inner.clone(),
         }
     }
 }
@@ -324,35 +525,94 @@ impl<T> Clone for UnboundedSender<T> {
 impl<T> Clone for UnboundedReceiver<T> {
     fn clone(&self) -> Self {
         UnboundedReceiver {
-            queue: self.queue.clone(),
+            inner: self.inner.clone(),
         }
     }
 }
 
-pub fn unbounded<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
-    let queue = Arc::new(Mutex::new(VecDeque::new()));
-    (
-        UnboundedSender {
-            queue: queue.clone(),
-        },
-        UnboundedReceiver { queue },
-    )
-}
-
-impl<T> UnboundedSender<T> {
-    pub fn send(&self, value: T) -> Result<(), T> {
-        self.queue.lock().push_back(value);
+impl<T: Send + 'static> UnboundedSender<T> {
+    pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+        let mut inner = self.inner.lock();
+        if inner.closed {
+            return Err(SendError::Disconnected(value));
+        }
+        inner.buffer.push_back(value);
+        if let Some(waiter) = inner.recv_waiters.pop_front() {
+            if waiter.status() == GStatus::Waiting {
+                waiter.set_status(GStatus::Runnable);
+                Scheduler::wake_g(waiter);
+            }
+        }
         Ok(())
     }
-}
 
-impl<T> UnboundedReceiver<T> {
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.queue.lock().pop_front().ok_or(TryRecvError::Empty)
+    pub fn close(&self) {
+        let mut inner = self.inner.lock();
+        if !inner.closed {
+            inner.closed = true;
+            while let Some(waiter) = inner.recv_waiters.pop_front() {
+                if waiter.status() == GStatus::Waiting {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
+            }
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().closed
     }
 }
 
-// ============== 有界 MPMC 队列（替代 crossbeam::queue::ArrayQueue） ==============
+impl<T: Send + 'static> UnboundedReceiver<T> {
+    pub fn recv(&self) -> Result<T, RecvError> {
+        loop {
+            let mut inner = self.inner.lock();
+
+            if let Some(value) = inner.buffer.pop_front() {
+                return Ok(value);
+            }
+
+            if inner.closed {
+                return Err(RecvError::Disconnected);
+            }
+
+            if let Some(current_g) = Scheduler::current_g() {
+                current_g.set_status(GStatus::Waiting);
+                inner.recv_waiters.push_back(current_g.clone());
+                drop(inner);
+                while current_g.status() == GStatus::Waiting {
+                    Scheduler::yield_now();
+                }
+            } else {
+                drop(inner);
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        let mut inner = self.inner.lock();
+
+        if let Some(value) = inner.buffer.pop_front() {
+            return Ok(value);
+        }
+
+        if inner.closed {
+            Err(TryRecvError::Disconnected)
+        } else {
+            Err(TryRecvError::Empty)
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().closed
+    }
+
+    pub fn has_data(&self) -> bool {
+        !self.inner.lock().buffer.is_empty()
+    }
+}
 
 pub struct BoundedQueue<T> {
     queue: Arc<Mutex<VecDeque<T>>>,
@@ -383,10 +643,17 @@ impl<T> BoundedQueue<T> {
     pub fn len(&self) -> usize {
         self.queue.lock().len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum TryRecvError {
-    Empty,
-    Disconnected,
+impl<T> Clone for BoundedQueue<T> {
+    fn clone(&self) -> Self {
+        BoundedQueue {
+            queue: self.queue.clone(),
+            capacity: self.capacity,
+        }
+    }
 }

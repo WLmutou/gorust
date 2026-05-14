@@ -5,6 +5,7 @@ use syn::{ItemFn, Type, parse_macro_input};
 mod select_parse;
 use select_parse::parse_select;
 
+
 /// Mark the main function to use the GoRust runtime
 ///
 /// # Example
@@ -93,7 +94,27 @@ pub fn make_chan(input: TokenStream) -> TokenStream {
     }
 }
 
-/// select! macro - Multiplex channel operations
+/// select! macro - Go 风格的 select 语法
+///
+/// # Example
+/// ```rust
+/// use gorust::{select, go, make_chan};
+/// use std::time::Duration;
+///
+/// let ch = make_chan!(i32, 10);
+///
+/// select! {
+///     val <- ch => {
+///         println!("Got: {}", val);
+///     },
+///     timeout!(Duration::from_secs(2)) => {
+///         println!("Timeout!");
+///     },
+///     default => {
+///         println!("No data");
+///     }
+/// }
+/// ```
 #[proc_macro]
 pub fn select(input: TokenStream) -> TokenStream {
     let input_str = input.to_string();
@@ -107,3 +128,5 @@ pub fn select(input: TokenStream) -> TokenStream {
         }
     }
 }
+
+
