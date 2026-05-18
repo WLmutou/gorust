@@ -55,9 +55,12 @@ pub fn runtime(_args: TokenStream, input: TokenStream) -> TokenStream {
             ::gorust::Runtime::wait_and_shutdown();
             ::gorust::Runtime::shutdown();
 
+            // 强制退出，避免后台线程（worker/timer/netpoller）阻塞程序结束
             match result {
-                Ok(ret) => ret,
-                Err(err) => std::panic::resume_unwind(err),
+                Ok(_) => std::process::exit(0),
+                Err(err) => {
+                    std::panic::resume_unwind(err);
+                }
             }
         }
     };

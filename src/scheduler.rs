@@ -72,8 +72,8 @@ impl G {
     pub fn run(&self) {
         if let Some(func) = self.func.lock().take() {
             func();
+            Runtime::untrack_goroutine();
         }
-        Runtime::untrack_goroutine();
     }
 
     #[inline]
@@ -462,6 +462,13 @@ impl Scheduler {
 
     pub fn is_running() -> bool {
         SCHEDULER.running.load(Ordering::Relaxed)
+    }
+
+    pub fn pending_goroutines() -> usize {
+        let global_size = SCHEDULER.global_queue.lock().len();
+        let local_size: usize = SCHEDULER.processors.iter().map(|p| p.local_queue.len()).sum();
+        let runnext_count = SCHEDULER.processors.iter().filter(|p| !p.runnext.load(Ordering::Acquire).is_null()).count();
+        global_size + local_size + runnext_count
     }
 
     pub fn current_g() -> Option<Arc<G>> {

@@ -55,6 +55,7 @@ struct ChannelInner<T> {
     closed: bool,
     send_waiters: VecDeque<Arc<G>>,
     recv_waiters: VecDeque<Arc<G>>,
+    pending_value: Option<T>,
 }
 
 pub struct Sender<T> {
@@ -120,6 +121,7 @@ fn _new<T: Send + 'static>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         closed: false,
         send_waiters: VecDeque::new(),
         recv_waiters: VecDeque::new(),
+        pending_value: None,
     }));
     (
         Sender {
@@ -149,21 +151,23 @@ impl<T: Send + 'static> Sender<T> {
                 return Ok(());
             } else if inner.capacity == 0 {
                 if let Some(waiter) = inner.recv_waiters.pop_front() {
-                    if waiter.status() == GStatus::Waiting {
-                        waiter.set_status(GStatus::Runnable);
-                        Scheduler::wake_g(waiter);
-                        return Ok(());
-                    }
+                    inner.pending_value = Some(value);
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                    return Ok(());
                 }
 
                 if let Some(current_g) = Scheduler::current_g() {
+                    // 无缓冲 channel：sender 等待时，把值存到 pending_value
+                    inner.pending_value = Some(value);
                     current_g.set_status(GStatus::Waiting);
                     inner.send_waiters.push_back(current_g.clone());
                     drop(inner);
                     while current_g.status() == GStatus::Waiting {
                         Scheduler::yield_now();
                     }
-                    continue;
+                    // 被唤醒后，值已经被 receiver 取走了
+                    return Ok(());
                 } else {
                     return Ok(());
                 }
@@ -231,12 +235,41 @@ impl<T: Send + 'static> Receiver<T> {
                 return Err(RecvError::Disconnected);
             }
 
+            // 无缓冲 channel：如果有 sender 等待，直接从 sender 接收值
+            if inner.capacity == 0 {
+                if let Some(waiter) = inner.send_waiters.pop_front() {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                    drop(inner);
+                    std::thread::yield_now();
+                    let mut inner2 = self.inner.lock();
+                    if let Some(value) = inner2.pending_value.take() {
+                        return Ok(value);
+                    }
+                    continue;
+                }
+            }
+
+            // 检查是否有 pending_value（sender 已经发送但 receiver 还没开始等待）
+            if let Some(value) = inner.pending_value.take() {
+                if let Some(waiter) = inner.send_waiters.pop_front() {
+                    waiter.set_status(GStatus::Runnable);
+                    Scheduler::wake_g(waiter);
+                }
+                return Ok(value);
+            }
+
             if let Some(current_g) = Scheduler::current_g() {
                 current_g.set_status(GStatus::Waiting);
                 inner.recv_waiters.push_back(current_g.clone());
                 drop(inner);
                 while current_g.status() == GStatus::Waiting {
                     Scheduler::yield_now();
+                }
+                // 醒来后检查 pending_value
+                let mut inner = self.inner.lock();
+                if let Some(value) = inner.pending_value.take() {
+                    return Ok(value);
                 }
             } else {
                 drop(inner);
@@ -286,6 +319,7 @@ impl<T: Send + 'static> Channel<T> {
             closed: false,
             send_waiters: VecDeque::new(),
             recv_waiters: VecDeque::new(),
+            pending_value: None,
         }));
         Arc::new(Channel { inner })
     }

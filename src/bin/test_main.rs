@@ -24,7 +24,7 @@ fn main() {
         mytestparam(2);
     });
 
-    let ch = make_chan!(i32);
+    let ch = make_chan!(i32, 1);
     let ch_snd = ch.clone();
     go(move || {
         debug!("Sending value 42...");
