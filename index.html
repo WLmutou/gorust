@@ -1,510 +1,1037 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>gorust — Go-style concurrency in Rust</title>
-  <style>
-    :root {
-      --bg: #0b1220;
-      --surface: #111b2e;
-      --border: #1e2d4d;
-      --text: #eaf0ff;
-      --muted: #94a3c7;
-      --accent: #6ee7b7;
-      --accent2: #93c5fd;
-      --radius: 14px;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoRust - Go-Style Concurrency in Rust</title>
+    <style>
+        :root {
+            --primary: #f74c00;
+            --primary-dark: #d43f00;
+            --secondary: #00add8;
+            --dark: #1a1a2e;
+            --darker: #16213e;
+            --light: #f8f9fa;
+            --gray: #6c757d;
+            --code-bg: #2d2d2d;
+            --success: #28a745;
+            --warning: #ffc107;
+        }
 
-    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-      height: 100%;
-      background: radial-gradient(1200px 600px at 10% -10%, rgba(59,130,246,.18), transparent 60%),
-                  radial-gradient(1000px 500px at 110% 0%, rgba(16,185,129,.18), transparent 60%),
-                  var(--bg);
-      color: var(--text);
-      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;
-      -webkit-font-smoothing: antialiased;
-    }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
 
-    /* NAV */
-    .nav {
-      position: fixed; top: 0; left: 0; right: 0; z-index: 20;
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 14px 22px;
-      background: rgba(11,18,32,.72);
-      backdrop-filter: blur(12px);
-      border-bottom: 1px solid rgba(30,45,77,.9);
-    }
-    .nav-brand {
-      display: flex; align-items: center; gap: 10px;
-      font-weight: 700; letter-spacing: .3px;
-    }
-    .nav-brand .dot {
-      width: 10px; height: 10px; border-radius: 50%;
-      background: linear-gradient(180deg, var(--accent), var(--accent2));
-      box-shadow: 0 0 10px rgba(110,231,183,.55);
-    }
-    .nav-links {
-      display: flex; gap: 14px;
-    }
-    .nav-links a {
-      color: var(--muted); text-decoration: none; font-size: 13.5px;
-      padding: 6px 10px; border-radius: 8px; transition: .2s;
-    }
-    .nav-links a:hover { color: #fff; background: rgba(255,255,255,.06); }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: var(--light);
+        }
 
-    /* SECTIONS */
-    .sections {
-      height: 100%;
-      overflow: hidden;
-      scroll-behavior: smooth;
-    }
-    section {
-      height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 90px 22px 40px;
-    }
-    .inner {
-      width: 100%;
-      max-width: 1080px;
-    }
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            background: rgba(26, 26, 46, 0.95);
+            backdrop-filter: blur(10px);
+            z-index: 1000;
+            padding: 1rem 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
 
-    /* HERO */
-    .hero h1 {
-      font-size: clamp(36px, 6vw, 62px);
-      line-height: 1.08;
-      font-weight: 800;
-      background: linear-gradient(180deg, #eaf0ff 30%, #93c5fd);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    .hero h1 span { -webkit-text-fill-color: var(--accent); }
-    .hero p {
-      margin-top: 16px;
-      color: var(--muted);
-      font-size: clamp(15px, 2vw, 18px);
-      line-height: 1.6;
-      max-width: 680px;
-    }
-    .hero-actions {
-      margin-top: 22px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-    }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 16px;
-      border-radius: var(--radius);
-      font-size: 14px;
-      font-weight: 600;
-      text-decoration: none;
-      border: 1px solid transparent;
-      transition: .2s;
-    }
-    .btn-primary {
-      background: linear-gradient(180deg, rgba(110,231,183,.18), rgba(110,231,183,.10));
-      border-color: rgba(110,231,183,.35);
-      color: #d1fae5;
-    }
-    .btn-primary:hover { background: rgba(110,231,183,.22); }
-    .btn-outline {
-      background: rgba(255,255,255,.03);
-      border-color: rgba(255,255,255,.12);
-      color: #c7d4f5;
-    }
-    .btn-outline:hover { background: rgba(255,255,255,.07); }
+        nav .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
 
-    /* SECTION TITLE */
-    .section-title {
-      font-size: clamp(22px, 3.5vw, 32px);
-      font-weight: 800;
-      margin-bottom: 14px;
-    }
-    .section-desc {
-      color: var(--muted);
-      font-size: 15.5px;
-      line-height: 1.65;
-      max-width: 760px;
-    }
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: white;
+            text-decoration: none;
+        }
 
-    /* CODE BLOCK */
-    .codewrap {
-      margin-top: 18px;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--surface);
-      overflow: hidden;
-    }
-    .codehead {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border);
-      background: rgba(17,27,46,.92);
-    }
-    .codehead .tag {
-      font-size: 12.5px;
-      color: var(--muted);
-      font-family: var(--mono);
-    }
-    .codehead button {
-      appearance: none;
-      border: 1px solid rgba(255,255,255,.12);
-      background: rgba(255,255,255,.04);
-      color: var(--muted);
-      font-size: 12px;
-      padding: 6px 10px;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: .2s;
-    }
-    .codehead button:hover { background: rgba(255,255,255,.09); color: #fff; }
-    pre {
-      margin: 0;
-      padding: 14px;
-      overflow-x: auto;
-      font-family: var(--mono);
-      font-size: 13.5px;
-      line-height: 1.7;
-      color: #c7d4f5;
-      tab-size: 4;
-    }
-    pre .k { color: #93c5fd; }
-    pre .f { color: #e0d6ff; }
-    pre .s { color: #6ee7b7; }
-    pre .c { color: #64748b; }
-    pre .n { color: #fbcfe8; }
+        .logo span:first-child {
+            color: var(--primary);
+        }
 
-    /* FEATURES GRID */
-    .features {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 14px;
-      margin-top: 18px;
-    }
-    .card {
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: linear-gradient(180deg, rgba(17,27,46,.92), rgba(17,27,46,.82));
-      padding: 16px;
-      transition: .2s;
-    }
-    .card:hover { border-color: rgba(110,231,183,.35); }
-    .card h3 {
-      font-size: 15px;
-      font-weight: 700;
-      margin-bottom: 8px;
-    }
-    .card p {
-      font-size: 13.5px;
-      color: var(--muted);
-      line-height: 1.6;
-    }
+        .logo span:last-child {
+            color: var(--secondary);
+        }
 
-    /* STATS */
-    .stats {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 14px;
-      margin-top: 18px;
-    }
-    .stat {
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: rgba(17,27,46,.82);
-      padding: 14px 16px;
-      min-width: 180px;
-    }
-    .stat .num {
-      font-size: 22px;
-      font-weight: 800;
-      color: #eaf0ff;
-    }
-    .stat .lbl {
-      font-size: 13px;
-      color: var(--muted);
-      margin-top: 4px;
-    }
+        nav ul {
+            display: flex;
+            list-style: none;
+            gap: 2rem;
+        }
 
-    /* FOOTER */
-    .footer {
-      text-align: center;
-      color: var(--muted);
-      font-size: 13.5px;
-      line-height: 1.7;
-    }
-    .footer a { color: var(--accent); }
+        nav a {
+            color: #fff;
+            text-decoration: none;
+            transition: color 0.3s;
+        }
 
-    /* PAGINATION DOTS */
-    .pager {
-      position: fixed;
-      right: 18px;
-      top: 50%;
-      transform: translateY(-50%);
-      z-index: 20;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .pager button {
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      border: 1px solid rgba(255,255,255,.18);
-      background: transparent;
-      cursor: pointer;
-      transition: .2s;
-    }
-    .pager button.active {
-      background: var(--accent);
-      border-color: var(--accent);
-      box-shadow: 0 0 10px rgba(110,231,183,.55);
-    }
+        nav a:hover {
+            color: var(--primary);
+        }
 
-    /* SCROLLBAR */
-    ::-webkit-scrollbar { width: 8px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(148,163,199,.25); border-radius: 99px; }
-  </style>
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+
+        /* Hero Section */
+        .hero {
+            background: linear-gradient(135deg, var(--dark) 0%, var(--darker) 100%);
+            color: white;
+            padding: 8rem 0 6rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.05'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+        }
+
+        .hero h1 {
+            font-size: 3.5rem;
+            margin-bottom: 1rem;
+            position: relative;
+        }
+
+        .hero h1 span:first-child {
+            color: var(--primary);
+        }
+
+        .hero h1 span:last-child {
+            color: var(--secondary);
+        }
+
+        .hero .tagline {
+            font-size: 1.5rem;
+            color: #aaa;
+            margin-bottom: 2rem;
+            position: relative;
+        }
+
+        .hero .description {
+            max-width: 700px;
+            margin: 0 auto 2rem;
+            color: #ccc;
+            position: relative;
+        }
+
+        .badge {
+            display: inline-block;
+            background: var(--primary);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+            position: relative;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 1rem 2rem;
+            border-radius: 5px;
+            text-decoration: none;
+            font-weight: bold;
+            transition: all 0.3s;
+            margin: 0.5rem;
+            position: relative;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-2px);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: white;
+            border: 2px solid white;
+        }
+
+        .btn-secondary:hover {
+            background: white;
+            color: var(--dark);
+        }
+
+        /* Features Section */
+        .features {
+            padding: 5rem 0;
+            background: white;
+        }
+
+        .section-title {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            color: var(--dark);
+        }
+
+        .section-subtitle {
+            text-align: center;
+            color: var(--gray);
+            margin-bottom: 3rem;
+            font-size: 1.1rem;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .feature-card {
+            background: var(--light);
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
+
+        .feature-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .feature-card h3 {
+            color: var(--dark);
+            margin-bottom: 0.5rem;
+        }
+
+        .feature-card p {
+            color: var(--gray);
+        }
+
+        /* Code Examples */
+        .examples {
+            padding: 5rem 0;
+            background: var(--light);
+        }
+
+        .code-block {
+            background: var(--code-bg);
+            border-radius: 10px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .code-block code {
+            color: #f8f8f2;
+            font-family: 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+
+        .code-block .comment { color: #75715e; }
+        .code-block .keyword { color: #f92672; }
+        .code-block .string { color: #e6db74; }
+        .code-block .function { color: #a6e22e; }
+        .code-block .type { color: #66d9ef; }
+        .code-block .macro { color: #fd971f; }
+        .code-block .number { color: #ae81ff; }
+
+        .example-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .tab-btn {
+            padding: 0.5rem 1rem;
+            background: var(--dark);
+            color: white;
+            border: none;
+            border-radius: 5px 5px 0 0;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .tab-btn.active {
+            background: var(--primary);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Architecture Section */
+        .architecture {
+            padding: 5rem 0;
+            background: white;
+        }
+
+        .arch-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-top: 2rem;
+        }
+
+        .arch-item {
+            background: linear-gradient(135deg, var(--dark), var(--darker));
+            color: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .arch-item::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: var(--primary);
+        }
+
+        .arch-item h4 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+
+        .arch-item p {
+            color: #ccc;
+            font-size: 0.9rem;
+        }
+
+        /* API Section */
+        .api {
+            padding: 5rem 0;
+            background: var(--light);
+        }
+
+        .api-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .api-table th {
+            background: var(--dark);
+            color: white;
+            padding: 1rem;
+            text-align: left;
+        }
+
+        .api-table td {
+            padding: 1rem;
+            border-bottom: 1px solid #eee;
+        }
+
+        .api-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .api-table code {
+            background: var(--code-bg);
+            color: var(--secondary);
+            padding: 0.2rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.9rem;
+        }
+
+        /* Installation */
+        .install {
+            padding: 5rem 0;
+            background: white;
+        }
+
+        .install-steps {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .install-step {
+            background: var(--light);
+            padding: 2rem;
+            border-radius: 10px;
+            border-left: 4px solid var(--primary);
+        }
+
+        .install-step h3 {
+            color: var(--dark);
+            margin-bottom: 1rem;
+        }
+
+        .install-step .step-number {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            background: var(--primary);
+            color: white;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 30px;
+            margin-right: 0.5rem;
+        }
+
+        /* Stats */
+        .stats {
+            padding: 4rem 0;
+            background: linear-gradient(135deg, var(--dark), var(--darker));
+            color: white;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+            text-align: center;
+        }
+
+        .stat-item h3 {
+            font-size: 3rem;
+            color: var(--primary);
+        }
+
+        .stat-item p {
+            color: #aaa;
+        }
+
+        /* Footer */
+        footer {
+            background: var(--dark);
+            color: white;
+            padding: 3rem 0;
+            text-align: center;
+        }
+
+        footer a {
+            color: var(--secondary);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2rem;
+            }
+
+            .hero .tagline {
+                font-size: 1.2rem;
+            }
+
+            nav ul {
+                display: none;
+            }
+
+            .section-title {
+                font-size: 2rem;
+            }
+        }
+
+        /* Scroll animations */
+        .fade-in {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.6s, transform 0.6s;
+        }
+
+        .fade-in.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    </style>
 </head>
 <body>
-
-  <!-- NAV -->
-  <div class="nav">
-    <div class="nav-brand">
-      <div class="dot"></div>
-      <div>gorust</div>
-    </div>
-    <div class="nav-links">
-      <a href="#hero">Home</a>
-      <a href="#about">About</a>
-      <a href="#install">Install</a>
-      <a href="#usage">Usage</a>
-      <a href="#features">Features</a>
-    </div>
-  </div>
-
-  <!-- PAGER DOTS -->
-  <div class="pager" id="pager"></div>
-
-  <!-- SECTIONS -->
-  <div class="sections" id="sections">
-
-    <!-- HERO -->
-    <section id="hero">
-      <div class="inner hero">
-        <h1>Go-style concurrency <br/><span>in Rust</span></h1>
-        <p>
-          <b>gorust</b> is an experimental library that brings Go-like concurrency patterns to Rust:
-          goroutines, channels, lightweight scheduling, and a familiar API for developers
-          moving between Go and Rust or wanting Go-style concurrency in Rust projects.
-        </p>
-        <div class="hero-actions">
-          <a class="btn btn-primary" href="https://github.com/WLmutou/gorust" target="_blank">
-            View on GitHub
-          </a>
-          <a class="btn btn-outline" href="#usage">See Usage</a>
+    <!-- Navigation -->
+    <nav>
+        <div class="container">
+            <a href="#" class="logo"><span>Go</span><span>Rust</span></a>
+            <ul>
+                <li><a href="#features">功能</a></li>
+                <li><a href="#examples">示例</a></li>
+                <li><a href="#architecture">架构</a></li>
+                <li><a href="#api">API</a></li>
+                <li><a href="#install">安装</a></li>
+                <li><a href="https://github.com/WLmutou/gorust">GitHub</a></li>
+            </ul>
         </div>
-      </div>
-    </section>
+    </nav>
 
-    <!-- ABOUT -->
-    <section id="about">
-      <div class="inner">
-        <h2 class="section-title">About</h2>
-        <p class="section-desc">
-          The primary goal of <b>gorust</b> is to provide Rust developers with familiar concurrency primitives
-          similar to those found in Go, especially Goroutines and channels, enabling lightweight concurrent
-          programming experiences and reducing the learning curve when transitioning between the two languages.
-        </p>
-        <div class="stats">
-          <div class="stat">
-            <div class="num">Rust</div>
-            <div class="lbl">Language</div>
-          </div>
-          <div class="stat">
-            <div class="num">MIT</div>
-            <div class="lbl">License</div>
-          </div>
-          <div class="stat">
-            <div class="num">Experimental</div>
-            <div class="lbl">Status</div>
-          </div>
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="container">
+            <div class="badge">v0.1.7 - Experimental</div>
+            <h1><span>Go</span><span>Rust</span></h1>
+            <p class="tagline">Go-Style Concurrency in Rust</p>
+            <p class="description">
+                将 Go 语言优雅的并发编程模式引入 Rust。提供熟悉的并发原语如 goroutines 和 channels，
+                让 Rust 并发编程更简单、更直观。
+            </p>
+            <a href="#install" class="btn btn-primary">快速开始</a>
+            <a href="https://github.com/WLmutou/gorust" class="btn btn-secondary">GitHub 仓库</a>
         </div>
-      </div>
     </section>
 
-    <!-- INSTALL -->
-    <section id="install">
-      <div class="inner">
-        <h2 class="section-title">Installation</h2>
-        <p class="section-desc">
-          Add <b>gorust</b> as a dependency via git (or from crates.io once published).
-        </p>
-
-        <div class="codewrap">
-          <div class="codehead">
-            <div class="tag">Cargo.toml</div>
-            <button onclick="copy(this, 'install-code')">Copy</button>
-          </div>
-          <pre id="install-code"><span class="k">[dependencies]</span>
-<span class="n">gorust</span> <span class="k">=</span> { <span class="n">git</span> <span class="k">=</span> <span class="s">"https://github.com/WLmutou/gorust.git"</span> }</pre>
+    <!-- Features Section -->
+    <section class="features" id="features">
+        <div class="container">
+            <h2 class="section-title">核心功能</h2>
+            <p class="section-subtitle">GoRust 提供了完整的 Go 风格并发原语集合</p>
+            
+            <div class="features-grid">
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🚀</div>
+                    <h3>Goroutines</h3>
+                    <p>轻量级协程，类似 Go 的 goroutine。使用 <code>go()</code> 函数轻松创建并发任务，自动管理生命周期。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">📡</div>
+                    <h3>Channels</h3>
+                    <p>支持有缓冲和无缓冲通道，实现 goroutine 间的通信。提供 <code>send()</code> 和 <code>recv()</code> 方法。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🎯</div>
+                    <h3>Select 宏</h3>
+                    <p>类似 Go 的 select 语句，支持多路复用通道操作。使用 <code>select!</code> 宏或函数式 API。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">⏱️</div>
+                    <h3>定时器</h3>
+                    <p>提供 <code>sleep()</code> 和 <code>sleep_ms()</code> 函数，支持协程级别的睡眠，不阻塞其他协程。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🔒</div>
+                    <h3>同步原语</h3>
+                    <p>WaitGroup、Mutex、RWMutex、AtomicCounter、Once 等完整的同步工具集合。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🌐</div>
+                    <h3>网络轮询器</h3>
+                    <p>基于 mio 的事件驱动网络轮询器，支持异步 I/O 操作，高效处理网络连接。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">📊</div>
+                    <h3>工作窃取调度器</h3>
+                    <p>M:N 调度模型，支持工作窃取算法，充分利用多核 CPU，自动负载均衡。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🔧</div>
+                    <h3>过程宏</h3>
+                    <p><code>#[runtime]</code>、<code>select!</code>、<code>make_chan!</code> 等宏，提供类 Go 语法。<code>go()</code> 函数用于创建协程。</p>
+                </div>
+                
+                <div class="feature-card fade-in">
+                    <div class="feature-icon">🛡️</div>
+                    <h3>Ctrl-C 信号处理</h3>
+                    <p>内置信号处理，优雅关闭运行时，确保所有 goroutine 安全退出。</p>
+                </div>
+            </div>
         </div>
-      </div>
     </section>
 
-    <!-- USAGE -->
-    <section id="usage">
-      <div class="inner">
-        <h2 class="section-title">Quick Start</h2>
-        <p class="section-desc">
-          Use <code style="font-family:var(--mono);color:#93c5fd;">#[runtime]</code>, <code style="font-family:var(--mono);color:#93c5fd;">go</code>,
-          <code style="font-family:var(--mono);color:#93c5fd;">channel</code>, <code style="font-family:var(--mono);color:#93c5fd;">WaitGroup</code> and more.
-        </p>
+    <!-- Examples Section -->
+    <section class="examples" id="examples">
+        <div class="container">
+            <h2 class="section-title">代码示例</h2>
+            <p class="section-subtitle">快速了解 GoRust 的使用方式</p>
+            
+            <div class="example-tabs">
+                <button class="tab-btn active" data-tab="basic">基础示例</button>
+                <button class="tab-btn" data-tab="channel">通道通信</button>
+                <button class="tab-btn" data-tab="select">Select</button>
+                <button class="tab-btn" data-tab="sync">同步原语</button>
+            </div>
 
-        <div class="codewrap">
-          <div class="codehead">
-            <div class="tag">main.rs</div>
-            <button onclick="copy(this, 'usage-code')">Copy</button>
-          </div>
-          <pre id="usage-code"><span class="k">use</span> <span class="n">gorust</span>::{<span class="n">runtime</span>, <span class="n">go</span>, <span class="n">channel</span>, <span class="n">sleep</span>};
+            <div class="tab-content active" id="basic">
+                <div class="code-block">
+                    <code><span class="keyword">use</span> gorust::{<span class="function">go</span>, <span class="function">runtime</span>, <span class="type">Runtime</span>, <span class="function">yield_now</span>, <span class="function">sleep</span>};
 
-<span class="k">#[runtime]</span>
-<span class="k">fn</span> <span class="f">main</span>() {
-  <span class="k">let</span> (<span class="n">tx</span>, <span class="n">rx</span>) <span class="k">=</span> <span class="n">channel</span>::<span class="f">new</span>();
-
-  <span class="n">go</span>(<span class="k">move</span> || {
-    <span class="n">sleep</span>(std::time::Duration::<span class="f">from_millis</span>(100));
-    <span class="n">tx</span>.<span class="f">send</span>(<span class="s">"Hello from goroutine!"</span>.<span class="f">to_string</span>()).<span class="f">unwrap</span>();
-  });
-
-  <span class="k">let</span> <span class="n">message</span> <span class="k">=</span> <span class="n">rx</span>.<span class="f">recv</span>().<span class="f">unwrap</span>();
-  <span class="n">println</span>!(<span class="s">"{}"</span>, <span class="n">message</span>);
-}</pre>
-        </div>
-      </div>
-    </section>
-
-    <!-- FEATURES -->
-    <section id="features">
-      <div class="inner">
-        <h2 class="section-title">Features</h2>
-        <p class="section-desc">
-          Planned and in-progress capabilities to make Go-style concurrency feel natural in Rust.
-        </p>
-
-        <div class="features">
-          <div class="card">
-            <h3>Goroutines</h3>
-            <p>Go-style goroutines implementation in Rust with lightweight scheduling.</p>
-          </div>
-          <div class="card">
-            <h3>Channels</h3>
-            <p>Channel communication between concurrent tasks, similar to Go’s chan.</p>
-          </div>
-          <div class="card">
-            <h3>Select-like</h3>
-            <p>Provide select-like functionality similar to Go (on the roadmap).</p>
-          </div>
-          <div class="card">
-            <h3>WaitGroup</h3>
-            <p>Synchronization helper so one task can wait for multiple goroutines.</p>
-          </div>
-          <div class="card">
-            <h3>Familiar API</h3>
-            <p>API designed to feel intuitive for developers experienced with Go concurrency.</p>
-          </div>
-          <div class="card">
-            <h3>Examples &amp; Tests</h3>
-            <p>Comprehensive examples, docs, tests and benchmarks planned in the roadmap.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- FOOTER -->
-    <section id="footer">
-      <div class="inner footer">
-        <p>
-          <b>gorust</b> · Go-style concurrency in Rust<br/>
-          <a href="https://github.com/WLmutou/gorust" target="_blank">github.com/WLmutou/gorust</a>
-        </p>
-        <p style="margin-top:8px;">MIT License</p>
-      </div>
-    </section>
-
-  </div>
-
-  <script>
-    const sectionsEl = document.getElementById('sections');
-    const sectionEls = Array.from(sectionsEl.querySelectorAll('section'));
-    const pager = document.getElementById('pager');
-    let current = 0;
-
-    // build dots
-    sectionEls.forEach((_, i) => {
-      const btn = document.createElement('button');
-      btn.setAttribute('aria-label', 'Go to section ' + (i + 1));
-      btn.addEventListener('click', () => goTo(i));
-      pager.appendChild(btn);
-    });
-    const dots = Array.from(pager.children);
-
-    function activate() {
-      dots.forEach((d, i) => d.classList.toggle('active', i === current));
-    }
-    function goTo(i) {
-      current = Math.max(0, Math.min(sectionEls.length - 1, i));
-      sectionEls[current].scrollIntoView({ behavior: 'smooth' });
-      activate();
-    }
-
-    // wheel -> snap
-    let wheelCooldown = false;
-    sectionsEl.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      if (wheelCooldown) return;
-      wheelCooldown = true;
-      if (e.deltaY > 0) goTo(current + 1);
-      else if (e.deltaY < 0) goTo(current - 1);
-      setTimeout(() => wheelCooldown = false, 420);
-    }, { passive: false });
-
-    // keyboard
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowDown') { e.preventDefault(); goTo(current + 1); }
-      if (e.key === 'ArrowUp') { e.preventDefault(); goTo(current - 1); }
+<span class="macro">#[runtime]</span>
+<span class="keyword">fn</span> <span class="function">main</span>() {
+    <span class="comment">// 创建 goroutine</span>
+    <span class="function">go</span>(|| {
+        <span class="macro">println!</span>(<span class="string">"Hello from goroutine!"</span>);
     });
 
-    // detect current section by scroll position
-    const observer = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) {
-          const idx = sectionEls.indexOf(entry.target);
-          if (idx !== -1) { current = idx; activate(); }
+    <span class="comment">// 带参数的 goroutine</span>
+    <span class="keyword">for</span> i <span class="keyword">in</span> <span class="number">0</span>..<span class="number">5</span> {
+        <span class="function">go</span>(<span class="keyword">move</span> || {
+            <span class="macro">println!</span>(<span class="string">"Goroutine {} is running"</span>, i);
+            <span class="function">yield_now</span>();
+            <span class="macro">println!</span>(<span class="string">"Goroutine {} done"</span>, i);
+        });
+    }
+
+    <span class="macro">println!</span>(<span class="string">"Active goroutines: {}"</span>, <span class="type">Runtime</span>::<span class="function">active_goroutines</span>());
+}</code>
+                </div>
+            </div>
+
+            <div class="tab-content" id="channel">
+                <div class="code-block">
+                    <code><span class="keyword">use</span> gorust::{<span class="function">go</span>, <span class="function">runtime</span>, <span class="function">make_chan</span>};
+
+<span class="macro">#[runtime]</span>
+<span class="keyword">fn</span> <span class="function">main</span>() {
+    <span class="comment">// 创建无缓冲通道</span>
+    <span class="keyword">let</span> ch = <span class="macro">make_chan!</span>(<span class="type">i32</span>);
+    
+    <span class="comment">// 发送端</span>
+    <span class="keyword">let</span> ch_snd = ch.<span class="function">clone</span>();
+    <span class="function">go</span>(<span class="keyword">move</span> || {
+        ch_snd.<span class="function">send</span>(<span class="number">42</span>).<span class="function">unwrap</span>();
+        <span class="macro">println!</span>(<span class="string">"Value sent!"</span>);
+    });
+
+    <span class="comment">// 接收端</span>
+    <span class="keyword">let</span> ch_rcv = ch.<span class="function">clone</span>();
+    <span class="function">go</span>(<span class="keyword">move</span> || {
+        <span class="keyword">let</span> value = ch_rcv.<span class="function">recv</span>().<span class="function">unwrap</span>();
+        <span class="macro">println!</span>(<span class="string">"Received: {}"</span>, value);
+    });
+
+    <span class="comment">// 有缓冲通道</span>
+    <span class="keyword">let</span> ch2 = <span class="macro">make_chan!</span>(<span class="type">String</span>, <span class="number">10</span>);
+    ch2.<span class="function">send</span>(<span class="string">"Hello"</span>.<span class="function">to_string</span>()).<span class="function">unwrap</span>();
+    <span class="keyword">let</span> received = ch2.<span class="function">recv</span>().<span class="function">unwrap</span>();
+}</code>
+                </div>
+            </div>
+
+            <div class="tab-content" id="select">
+                <div class="code-block">
+                    <code><span class="keyword">use</span> gorust::{<span class="function">go</span>, <span class="function">runtime</span>, <span class="function">make_chan</span>, <span class="function">select</span>, <span class="function">sleep</span>};
+<span class="keyword">use</span> std::time::Duration;
+
+<span class="macro">#[runtime]</span>
+<span class="keyword">fn</span> <span class="function">main</span>() {
+    <span class="keyword">let</span> ch1 = <span class="macro">make_chan!</span>(<span class="type">i32</span>);
+    <span class="keyword">let</span> ch2 = <span class="macro">make_chan!</span>(<span class="type">String</span>);
+
+    <span class="comment">// 使用 select! 宏</span>
+    <span class="macro">select!</span> {
+        recv(ch1) -> msg => {
+            <span class="macro">println!</span>(<span class="string">"Got from ch1: {:?}"</span>, msg);
         }
-      }
-    }, { threshold: 0.55 });
-    sectionEls.forEach((s) => observer.observe(s));
-
-    activate();
-
-    // copy
-    function copy(btn, id) {
-      const el = document.getElementById(id);
-      if (!el) return;
-      navigator.clipboard.writeText(el.textContent).then(() => {
-        btn.textContent = 'Copied';
-        setTimeout(() => btn.textContent = 'Copy', 1200);
-      });
+        recv(ch2) -> msg => {
+            <span class="macro">println!</span>(<span class="string">"Got from ch2: {:?}"</span>, msg);
+        }
+        default => {
+            <span class="macro">println!</span>(<span class="string">"No channel ready"</span>);
+        }
     }
-  </script>
+
+    <span class="comment">// 使用函数式 API</span>
+    <span class="keyword">let</span> result = <span class="function">select_builder</span>()
+        .<span class="function">recv</span>(&ch1, |msg| <span class="macro">println!</span>(<span class="string">"Got: {:?}"</span>, msg))
+        .<span class="function">timeout</span>(Duration::<span class="function">from_secs</span>(<span class="number">2</span>), || <span class="macro">println!</span>(<span class="string">"Timeout!"</span>))
+        .<span class="function">execute</span>();
+}</code>
+                </div>
+            </div>
+
+            <div class="tab-content" id="sync">
+                <div class="code-block">
+                    <code><span class="keyword">use</span> gorust::{<span class="function">go</span>, <span class="function">runtime</span>, <span class="function">sleep</span>};
+<span class="keyword">use</span> gorust::sync::{<span class="type">WaitGroup</span>, <span class="type">AtomicCounter</span>};
+<span class="keyword">use</span> std::time::Duration;
+
+<span class="macro">#[runtime]</span>
+<span class="keyword">fn</span> <span class="function">main</span>() {
+    <span class="comment">// WaitGroup 示例</span>
+    <span class="keyword">let</span> wg = <span class="type">WaitGroup</span>::<span class="function">new</span>();
+    <span class="keyword">for</span> i <span class="keyword">in</span> <span class="number">0</span>..<span class="number">3</span> {
+        wg.<span class="function">add</span>(<span class="number">1</span>);
+        <span class="keyword">let</span> wg_clone = wg.<span class="function">clone</span>();
+        <span class="function">go</span>(<span class="keyword">move</span> || {
+            <span class="macro">println!</span>(<span class="string">"Task {} starting"</span>, i);
+            <span class="function">sleep</span>(Duration::<span class="function">from_secs</span>(i));
+            <span class="macro">println!</span>(<span class="string">"Task {} finished"</span>, i);
+            wg_clone.<span class="function">done</span>();
+        });
+    }
+    wg.<span class="function">wait</span>();
+
+    <span class="comment">// AtomicCounter 示例</span>
+    <span class="keyword">let</span> counter = <span class="type">AtomicCounter</span>::<span class="function">new</span>();
+    <span class="keyword">for</span> _ <span class="keyword">in</span> <span class="number">0</span>..<span class="number">100</span> {
+        <span class="keyword">let</span> c = counter.<span class="function">clone</span>();
+        <span class="function">go</span>(<span class="keyword">move</span> || {
+            c.<span class="function">increment</span>();
+        });
+    }
+    <span class="macro">println!</span>(<span class="string">"Count: {}"</span>, counter.<span class="function">get</span>());
+}</code>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Architecture Section -->
+    <section class="architecture" id="architecture">
+        <div class="container">
+            <h2 class="section-title">架构设计</h2>
+            <p class="section-subtitle">GoRust 的核心组件和模块</p>
+            
+            <div class="arch-grid">
+                <div class="arch-item fade-in">
+                    <h4>scheduler.rs</h4>
+                    <p>M:N 工作窃取调度器，管理 P（Processor）和 G（Goroutine），实现负载均衡和高效调度。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>go_runtime.rs</h4>
+                    <p>运行时管理，负责 goroutine 生命周期、初始化、等待完成和优雅关闭。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>channel.rs</h4>
+                    <p>通道实现，支持有缓冲和无缓冲通道，包含等待队列和值传递机制。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>g_select.rs</h4>
+                    <p>Select 功能实现，提供函数式 API 和多路复用通道操作支持。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>timer.rs</h4>
+                    <p>分层定时器系统，支持协程级别的 sleep 操作，不阻塞其他协程。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>sync.rs</h4>
+                    <p>同步原语集合：WaitGroup、Mutex、RWMutex、AtomicCounter、Once、Pool、Context。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>netpoller.rs</h4>
+                    <p>基于 mio 的事件驱动网络轮询器，支持异步 I/O 和连接管理。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>stack.rs</h4>
+                    <p>协程栈管理，支持栈的分配、扩展和回收，优化内存使用。</p>
+                </div>
+                
+                <div class="arch-item fade-in">
+                    <h4>go-macros</h4>
+                    <p>过程宏库：#[runtime]、go!、select!、make_chan! 提供类 Go 语法糖。</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- API Section -->
+    <section class="api" id="api">
+        <div class="container">
+            <h2 class="section-title">API 参考</h2>
+            <p class="section-subtitle">核心 API 和模块说明</p>
+            
+            <table class="api-table">
+                <thead>
+                    <tr>
+                        <th>模块</th>
+                        <th>类型/函数</th>
+                        <th>说明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>gorust</code></td>
+                        <td><code>go!(closure)</code></td>
+                        <td>创建并调度一个新的 goroutine</td>
+                    </tr>
+                    <tr>
+                        <td><code>gorust</code></td>
+                        <td><code>yield_now()</code></td>
+                        <td>让出当前 goroutine 的执行权</td>
+                    </tr>
+                    <tr>
+                        <td><code>gorust</code></td>
+                        <td><code>sleep(duration)</code></td>
+                        <td>协程级别的睡眠，不阻塞其他协程</td>
+                    </tr>
+                    <tr>
+                        <td><code>gorust</code></td>
+                        <td><code>sleep_ms(ms)</code></td>
+                        <td>按毫秒睡眠的便捷函数</td>
+                    </tr>
+                    <tr>
+                        <td><code>channel</code></td>
+                        <td><code>Channel::new(capacity)</code></td>
+                        <td>创建通道，capacity=0 为无缓冲</td>
+                    </tr>
+                    <tr>
+                        <td><code>channel</code></td>
+                        <td><code>sender.send(value)</code></td>
+                        <td>发送值到通道，可能阻塞</td>
+                    </tr>
+                    <tr>
+                        <td><code>channel</code></td>
+                        <td><code>receiver.recv()</code></td>
+                        <td>从通道接收值，可能阻塞</td>
+                    </tr>
+                    <tr>
+                        <td><code>channel</code></td>
+                        <td><code>make_chan!(T)</code></td>
+                        <td>创建无缓冲通道的宏</td>
+                    </tr>
+                    <tr>
+                        <td><code>channel</code></td>
+                        <td><code>make_chan!(T, N)</code></td>
+                        <td>创建有缓冲通道的宏</td>
+                    </tr>
+                    <tr>
+                        <td><code>g_select</code></td>
+                        <td><code>select!</code></td>
+                        <td>多路复用通道操作的宏</td>
+                    </tr>
+                    <tr>
+                        <td><code>g_select</code></td>
+                        <td><code>select_builder()</code></td>
+                        <td>函数式 select API</td>
+                    </tr>
+                    <tr>
+                        <td><code>sync</code></td>
+                        <td><code>WaitGroup</code></td>
+                        <td>等待一组 goroutine 完成</td>
+                    </tr>
+                    <tr>
+                        <td><code>sync</code></td>
+                        <td><code>Mutex / RWMutex</code></td>
+                        <td>互斥锁和读写锁</td>
+                    </tr>
+                    <tr>
+                        <td><code>sync</code></td>
+                        <td><code>AtomicCounter</code></td>
+                        <td>原子计数器</td>
+                    </tr>
+                    <tr>
+                        <td><code>sync</code></td>
+                        <td><code>Once</code></td>
+                        <td>确保代码只执行一次</td>
+                    </tr>
+                    <tr>
+                        <td><code>sync</code></td>
+                        <td><code>Pool</code></td>
+                        <td>对象池，复用资源</td>
+                    </tr>
+                    <tr>
+                        <td><code>sync</code></td>
+                        <td><code>Context</code></td>
+                        <td>上下文，支持取消和超时</td>
+                    </tr>
+                    <tr>
+                        <td><code>go_runtime</code></td>
+                        <td><code>Runtime::init()</code></td>
+                        <td>初始化运行时</td>
+                    </tr>
+                    <tr>
+                        <td><code>go_runtime</code></td>
+                        <td><code>Runtime::wait_for_all()</code></td>
+                        <td>等待所有 goroutine 完成</td>
+                    </tr>
+                    <tr>
+                        <td><code>go_runtime</code></td>
+                        <td><code>Runtime::shutdown()</code></td>
+                        <td>关闭运行时</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Installation Section -->
+    <section class="install" id="install">
+        <div class="container">
+            <h2 class="section-title">安装指南</h2>
+            <p class="section-subtitle">快速开始使用 GoRust</p>
+            
+            <div class="install-steps">
+                <div class="install-step fade-in">
+                    <h3><span class="step-number">1</span> 添加依赖</h3>
+                    <p>在 <code>Cargo.toml</code> 中添加：</p>
+                    <div class="code-block">
+                        <code>
+[dependencies]
+gorust = { git = "https://github.com/WLmutou/gorust.git" }
+                        </code>
+                    </div>
+                </div>
+                
+                <div class="install-step fade-in">
+                    <h3><span class="step-number">2</span> 编写代码</h3>
+                    <p>在你的代码中导入并使用：</p>
+                    <div class="code-block">
+                        <code>
+use gorust::{go, runtime, make_chan};
+
+#[runtime]
+fn main() {
+    // 创建 goroutine
+    go(|| {
+        println!("Hello GoRust!");
+    });
+    
+    // 带参数
+    for i in 0..3 {
+        go(move || {
+            println!("Task {}", i);
+        });
+    }
+}
+                        </code>
+                    </div>
+                </div>
+                
+                <div class="install-step fade-in">
+                    <h3><span class="step-number">3</span> 运行程序</h3>
+                    <p>使用 cargo 运行你的项目：</p>
+                    <div class="code-block">
+                        <code>
+cargo run
+                        </code>
+                    </div>
+                    <p style="margin-top: 1rem;">或者克隆仓库运行示例：</p>
+                    <div class="code-block">
+                        <code>
+git clone https://github.com/WLmutou/gorust.git
+cd gorust
+cargo run --example basic
+                        </code>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section class="stats">
+        <div class="container">
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <h3>9+</h3>
+                    <p>核心模块</p>
+                </div>
+                <div class="stat-item">
+                    <h3>15+</h3>
+                    <p>示例程序</p>
+                </div>
+                <div class="stat-item">
+                    <h3>4</h3>
+                    <p>过程宏</p>
+                </div>
+                <div class="stat-item">
+                    <h3>M:N</h3>
+                    <p>调度模型</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container">
+            <div class="footer-links">
+                <a href="https://github.com/WLmutou/gorust">GitHub</a>
+                <a href="https://docs.rs/gorust">文档</a>
+                <a href="https://crates.io/crates/gorust">Crates.io</a>
+                <a href="https://github.com/WLmutou/gorust/issues">问题反馈</a>
+            </div>
+            <p>MIT License | 由 <a href="https://github.com/WLmutou">lijun</a> 创建</p>
+            <p style="margin-top: 0.5rem; color: #666;">
+                GoRust 是一个实验性项目，旨在将 Go 的并发模式引入 Rust
+            </p>
+        </div>
+    </footer>
+
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                
+                btn.classList.add('active');
+                document.getElementById(btn.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Scroll animations
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                }
+            });
+        }, { threshold: 0.1 });
+
+        document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+        // Smooth scroll
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            });
+        });
+    </script>
 </body>
 </html>
