@@ -906,10 +906,8 @@
                     <h3><span class="step-number">1</span> 添加依赖</h3>
                     <p>在 <code>Cargo.toml</code> 中添加：</p>
                     <div class="code-block">
-                        <code>
-[dependencies]
-gorust = { git = "https://github.com/WLmutou/gorust.git" }
-                        </code>
+                        <code>[dependencies]
+gorust = { git = "https://github.com/WLmutou/gorust.git" }</code>
                     </div>
                 </div>
                 
@@ -917,8 +915,7 @@ gorust = { git = "https://github.com/WLmutou/gorust.git" }
                     <h3><span class="step-number">2</span> 编写代码</h3>
                     <p>在你的代码中导入并使用：</p>
                     <div class="code-block">
-                        <code>
-use gorust::{go, runtime, make_chan};
+                        <code>use gorust::{go, runtime, make_chan};
 
 #[runtime]
 fn main() {
@@ -933,8 +930,7 @@ fn main() {
             println!("Task {}", i);
         });
     }
-}
-                        </code>
+}</code>
                     </div>
                 </div>
                 
@@ -942,17 +938,13 @@ fn main() {
                     <h3><span class="step-number">3</span> 运行程序</h3>
                     <p>使用 cargo 运行你的项目：</p>
                     <div class="code-block">
-                        <code>
-cargo run
-                        </code>
+                        <code>cargo run</code>
                     </div>
                     <p style="margin-top: 1rem;">或者克隆仓库运行示例：</p>
                     <div class="code-block">
-                        <code>
-git clone https://github.com/WLmutou/gorust.git
+                        <code>git clone https://github.com/WLmutou/gorust.git
 cd gorust
-cargo run --example basic
-                        </code>
+cargo run --example basic</code>
                     </div>
                 </div>
             </div>
