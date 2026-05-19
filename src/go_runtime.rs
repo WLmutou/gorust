@@ -76,14 +76,20 @@ impl Runtime {
         debug!("⏳ Waiting for all goroutines to complete...");
 
         let start = Instant::now();
-        let mut last_count = RUNTIME_STATE.active_count();
+        let mut last_count = Self::active_goroutines();
 
-        while RUNTIME_STATE.active_count() > 0 {
-            let current_count = RUNTIME_STATE.active_count();
-            if current_count != last_count {
-                last_count = current_count;
+        loop {
+            let active = Self::active_goroutines();
+            let pending = scheduler::Scheduler::pending_goroutines();
+            
+            if active == 0 && pending == 0 {
+                break;
+            }
+            
+            if active != last_count {
+                last_count = active;
                 if cfg!(debug_assertions) {
-                    debug!("   Active goroutines: {}", current_count);
+                    debug!("   Active goroutines: {}, pending: {}", active, pending);
                 }
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -155,8 +161,20 @@ impl Runtime {
 
     /// 等待所有 goroutine 完成并关闭调度器
     pub fn wait_and_shutdown() {
-        // 等待所有 goroutine 完成
-        while Self::active_goroutines() > 0 {
+        debug!("⏳ Waiting for all goroutines to complete and queues to drain...");
+        // 等待所有 goroutine 完成且调度队列为空
+        let mut iterations = 0;
+        loop {
+            let active = Self::active_goroutines();
+            let pending = scheduler::Scheduler::pending_goroutines();
+            if active == 0 && pending == 0 {
+                debug!("✅ All goroutines completed and queues drained in {} iterations", iterations);
+                break;
+            }
+            if iterations % 100 == 0 {
+                debug!("   Waiting... active: {}, pending: {}", active, pending);
+            }
+            iterations += 1;
             std::thread::yield_now();
         }
         
