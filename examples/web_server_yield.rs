@@ -11,15 +11,17 @@ const BODY: &[u8] = b"<html><body>\
                        </body></html>";
 
 // 自动计算 Content-Length
+#[allow(dead_code)]
 const CONTENT_LENGTH: usize = BODY.len();
 
+#[allow(dead_code)]
 const RESPONSE_HEADER: &[u8] = b"HTTP/1.1 200 OK\r\n\
                                 Content-Type: text/html\r\n\
                                 Connection: close\r\n";
 
 // 构建完整响应（编译时）
+#[allow(dead_code)]
 const FULL_RESPONSE: &[u8] = {
-    let header_len = RESPONSE_HEADER.len();
     // let content_len_str = format!("Content-Length: {}\r\n\r\n", CONTENT_LENGTH);
     // let content_len_bytes = content_len_str.as_bytes();
 

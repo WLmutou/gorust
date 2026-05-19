@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod channel_tests {
-    use gorust::channel::{self, Channel, RecvError, SendError};
+    use gorust::channel::{self,  RecvError, SendError};
     use gorust::go;
     use gorust::sync::WaitGroup;
     use gorust::Runtime;
@@ -298,7 +298,7 @@ mod timer_tests {
 #[cfg(test)]
 mod select_tests {
     use gorust::channel;
-    use gorust::g_select::{Select, SelectOutcome};
+    use gorust::g_select::Select;
     use gorust::Runtime;
 
     #[test]

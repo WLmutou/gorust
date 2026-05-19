@@ -40,7 +40,7 @@ impl RuntimeState {
         self.active_goroutines.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn active_count(&self) -> usize {
+    fn _active_count(&self) -> usize {
         self.active_goroutines.load(Ordering::Relaxed)
     }
 

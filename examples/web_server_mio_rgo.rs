@@ -73,7 +73,7 @@ fn main() -> std::io::Result<()> {
     println!("=== GoRust + Mio Async Server on :8080 ===");
 
     let mut listener = TcpListener::bind("127.0.0.1:8080".parse().unwrap())?;
-    let mut reactor = REACTOR.lock().unwrap();
+    let reactor = REACTOR.lock().unwrap();
     let listener_token = Token(0);
     reactor
         .poll

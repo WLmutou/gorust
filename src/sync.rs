@@ -250,6 +250,7 @@ struct ContextInner {
     done: AtomicBool,
     deadline: parking_lot::Mutex<Option<Instant>>,
     err: parking_lot::Mutex<Option<String>>,
+    #[allow(dead_code)]
     children: parking_lot::Mutex<Vec<Arc<parking_lot::Condvar>>>,
 }
 

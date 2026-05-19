@@ -20,6 +20,7 @@ enum Case {
     },
 }
 
+#[allow(dead_code)]
 trait SelectableChannel: Send + Sync {
     fn try_receive(&self) -> Option<Box<dyn Any>>;
     fn is_closed(&self) -> bool;

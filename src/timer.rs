@@ -13,6 +13,7 @@ const TIMER_TICK_MS: u64 = 10;
 struct TimerEntry {
     wake_time: Instant,
     g: Arc<G>,
+    #[allow(dead_code)]
     bucket_id: usize,
 }
 
