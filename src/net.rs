@@ -65,8 +65,17 @@ impl AsyncTcpStream {
 
     pub fn write_all(&self, mut buf: &[u8]) -> io::Result<()> {
         while !buf.is_empty() {
-            let n = self.write(buf)?;
-            buf = &buf[n..];
+            match self.inner.lock().write(buf) {
+                Ok(0) => return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                )),
+                Ok(n) => buf = &buf[n..],
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.wait_writable();
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -82,8 +91,13 @@ impl AsyncTcpStream {
             }),
         );
 
+        let mut spin_count = 0u32;
         while rx.try_recv().is_err() {
             scheduler::yield_now();
+            spin_count += 1;
+            if spin_count > 10 {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
         }
     }
 
@@ -98,8 +112,13 @@ impl AsyncTcpStream {
             }),
         );
 
+        let mut spin_count = 0u32;
         while rx.try_recv().is_err() {
             scheduler::yield_now();
+            spin_count += 1;
+            if spin_count > 10 {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
         }
     }
 
@@ -109,6 +128,20 @@ impl AsyncTcpStream {
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         self.inner.lock().peer_addr()
+    }
+    
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        self.inner.lock().set_nodelay(nodelay)
+    }
+    
+    pub fn try_clone(&self) -> io::Result<AsyncTcpStream> {
+        let inner = self.inner.lock().try_clone()?;
+        let fd = inner.as_raw_fd();
+        Ok(AsyncTcpStream {
+            inner: Arc::new(Mutex::new(inner)),
+            connected: Arc::new(AtomicBool::new(true)),
+            fd,
+        })
     }
 }
 
@@ -164,8 +197,13 @@ impl AsyncTcpListener {
             }),
         );
 
+        let mut spin_count = 0u32;
         while rx.try_recv().is_err() {
             scheduler::yield_now();
+            spin_count += 1;
+            if spin_count > 100 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 
