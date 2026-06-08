@@ -1,6 +1,5 @@
 // src/net.rs
 use crate::netpoller::{self, Interest};
-use crate::scheduler;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, TcpListener, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
@@ -91,13 +90,9 @@ impl AsyncTcpStream {
             }),
         );
 
-        let mut spin_count = 0u32;
+        // Use blocking wait instead of spinning to avoid busy-waiting CPU usage
         while rx.try_recv().is_err() {
-            scheduler::yield_now();
-            spin_count += 1;
-            if spin_count > 10 {
-                std::thread::sleep(std::time::Duration::from_micros(100));
-            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
@@ -112,13 +107,9 @@ impl AsyncTcpStream {
             }),
         );
 
-        let mut spin_count = 0u32;
+        // Use blocking wait to avoid busy-waiting CPU usage
         while rx.try_recv().is_err() {
-            scheduler::yield_now();
-            spin_count += 1;
-            if spin_count > 10 {
-                std::thread::sleep(std::time::Duration::from_micros(100));
-            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
@@ -142,6 +133,22 @@ impl AsyncTcpStream {
             connected: Arc::new(AtomicBool::new(true)),
             fd,
         })
+    }
+}
+
+impl Read for AsyncTcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        AsyncTcpStream::read(self, buf)
+    }
+}
+
+impl Write for AsyncTcpStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        AsyncTcpStream::write(self, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.lock().flush()
     }
 }
 
@@ -197,13 +204,9 @@ impl AsyncTcpListener {
             }),
         );
 
-        let mut spin_count = 0u32;
+        // Use blocking wait to avoid busy-waiting CPU usage
         while rx.try_recv().is_err() {
-            scheduler::yield_now();
-            spin_count += 1;
-            if spin_count > 100 {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 

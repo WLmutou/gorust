@@ -16,9 +16,6 @@ use std::time::{Duration, Instant};
 // ============== 优化参数 ==============
 const LOCAL_QUEUE_SIZE: usize = 256;
 const WORK_STEALING_ATTEMPTS: usize = 2;
-const MAX_SPIN_ITERATIONS: usize = 100;
-const MIN_SLEEP_US: u64 = 50;
-const MAX_SLEEP_US: u64 = 100000;
 
 // ============= 添加 thread_local! 宏 ===========
 thread_local! {
@@ -140,6 +137,7 @@ pub struct P {
     runnext: AtomicPtr<G>,
     work_count: AtomicUsize,
     steals: AtomicUsize,
+    park_thread: Mutex<Option<std::thread::Thread>>,
 }
 
 impl P {
@@ -151,6 +149,7 @@ impl P {
             runnext: AtomicPtr::new(ptr::null_mut()),
             work_count: AtomicUsize::new(0),
             steals: AtomicUsize::new(0),
+            park_thread: Mutex::new(None),
         }
     }
 
@@ -166,6 +165,10 @@ impl P {
             }
         }
         self.work_count.fetch_add(1, Ordering::Relaxed);
+        // Wake up the parked worker thread
+        if let Some(thread) = self.park_thread.lock().as_ref() {
+            thread.unpark();
+        }
     }
 
     #[inline]
@@ -360,6 +363,12 @@ impl Scheduler {
     pub fn push_global_batch(gs: &[Arc<G>]) {
         let mut global = SCHEDULER.global_queue.lock();
         global.extend_from_slice(gs);
+        // Wake the first worker to pick up global work
+        if let Some(p) = SCHEDULER.processors.first() {
+            if let Some(thread) = p.park_thread.lock().as_ref() {
+                thread.unpark();
+            }
+        }
     }
 
     pub fn go<F>(f: F) -> Arc<G>
@@ -405,12 +414,11 @@ impl Scheduler {
         }
         p.set_status(PStatus::Running);
 
-        let mut spin_count = 0;
+        // Store the current thread handle for park/unpark
+        *p.park_thread.lock() = Some(thread::current());
 
         while SCHEDULER.running.load(Ordering::Relaxed) {
             if let Some(g) = Self::get_runnable_g(&p) {
-                spin_count = 0;
-
                 Self::set_current_g(Some(g.clone()));
 
                 g.set_status(GStatus::Running);
@@ -432,16 +440,8 @@ impl Scheduler {
 
                 Self::set_current_g(None);
             } else {
-                if spin_count < MAX_SPIN_ITERATIONS {
-                    spin_count += 1;
-                    SCHEDULER.stats.total_spins.fetch_add(1, Ordering::Relaxed);
-                    thread::yield_now();
-                } else {
-                    SCHEDULER.stats.total_sleeps.fetch_add(1, Ordering::Relaxed);
-                    spin_count += 1;
-                    let sleep_us = MIN_SLEEP_US.saturating_mul(1 << ((spin_count - MAX_SPIN_ITERATIONS).min(11))).min(MAX_SLEEP_US);
-                    thread::sleep(Duration::from_micros(sleep_us));
-                }
+                // Park the thread until new work arrives (with 50ms timeout for safety)
+                thread::park_timeout(Duration::from_millis(50));
             }
         }
 
@@ -452,6 +452,12 @@ impl Scheduler {
 
     pub fn shutdown() {
         SCHEDULER.running.store(false, Ordering::Relaxed);
+        // Wake all parked workers so they can see the running flag and exit
+        for p in SCHEDULER.processors.iter() {
+            if let Some(thread) = p.park_thread.lock().as_ref() {
+                thread.unpark();
+            }
+        }
         timer::shutdown_timer();
         crate::netpoller::stop();
     }

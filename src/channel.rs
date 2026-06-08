@@ -152,7 +152,6 @@ impl<T: Send + 'static> Sender<T> {
             } else if inner.capacity == 0 {
                 if let Some(waiter) = inner.recv_waiters.pop_front() {
                     inner.pending_value = Some(value);
-                    waiter.set_status(GStatus::Runnable);
                     Scheduler::wake_g(waiter);
                     return Ok(());
                 }
@@ -325,15 +324,16 @@ impl<T: Send + 'static> Channel<T> {
     }
 
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+        let mut value = Some(value);
         loop {
             let mut inner = self.inner.lock();
 
             if inner.closed {
-                return Err(SendError::Disconnected(value));
+                return Err(SendError::Disconnected(value.take().unwrap()));
             }
 
             if inner.capacity > 0 && inner.buffer.len() < inner.capacity {
-                inner.buffer.push_back(value);
+                inner.buffer.push_back(value.take().unwrap());
                 if let Some(waiter) = inner.recv_waiters.pop_front() {
                     if waiter.status() == GStatus::Waiting {
                         waiter.set_status(GStatus::Runnable);
@@ -344,25 +344,26 @@ impl<T: Send + 'static> Channel<T> {
             } else if inner.capacity == 0 {
                 if let Some(waiter) = inner.recv_waiters.pop_front() {
                     if waiter.status() == GStatus::Waiting {
-                        waiter.set_status(GStatus::Runnable);
+                        inner.pending_value = value.take();
                         Scheduler::wake_g(waiter);
                         return Ok(());
                     }
                 }
 
                 if let Some(current_g) = Scheduler::current_g() {
+                    inner.pending_value = value.take();
                     current_g.set_status(GStatus::Waiting);
                     inner.send_waiters.push_back(current_g.clone());
                     drop(inner);
                     while current_g.status() == GStatus::Waiting {
                         Scheduler::yield_now();
                     }
-                    continue;
+                    return Ok(());
                 } else {
                     return Ok(());
                 }
             } else {
-                return Err(SendError::Full(value));
+                return Err(SendError::Full(value.take().unwrap()));
             }
         }
     }
@@ -395,7 +396,6 @@ impl<T: Send + 'static> Channel<T> {
             if let Some(value) = inner.buffer.pop_front() {
                 if let Some(waiter) = inner.send_waiters.pop_front() {
                     if waiter.status() == GStatus::Waiting {
-                        waiter.set_status(GStatus::Runnable);
                         Scheduler::wake_g(waiter);
                     }
                 }
@@ -406,12 +406,43 @@ impl<T: Send + 'static> Channel<T> {
                 return Err(RecvError::Disconnected);
             }
 
+            // 无缓冲 channel：如果有 sender 等待，直接从 sender 接收值
+            if inner.capacity == 0 {
+                if let Some(waiter) = inner.send_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        Scheduler::wake_g(waiter);
+                        drop(inner);
+                        std::thread::yield_now();
+                        let mut inner2 = self.inner.lock();
+                        if let Some(value) = inner2.pending_value.take() {
+                            return Ok(value);
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // 检查是否有 pending_value
+            if let Some(value) = inner.pending_value.take() {
+                if let Some(waiter) = inner.send_waiters.pop_front() {
+                    if waiter.status() == GStatus::Waiting {
+                        Scheduler::wake_g(waiter);
+                    }
+                }
+                return Ok(value);
+            }
+
             if let Some(current_g) = Scheduler::current_g() {
                 current_g.set_status(GStatus::Waiting);
                 inner.recv_waiters.push_back(current_g.clone());
                 drop(inner);
                 while current_g.status() == GStatus::Waiting {
                     Scheduler::yield_now();
+                }
+                // 醒来后检查 pending_value
+                let mut inner = self.inner.lock();
+                if let Some(value) = inner.pending_value.take() {
+                    return Ok(value);
                 }
             } else {
                 drop(inner);

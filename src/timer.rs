@@ -148,13 +148,28 @@ pub fn sleep(duration: Duration) {
             let bucket = &TIMER_BUCKETS[bucket_id];
             bucket.heap.lock().push(entry);
 
+            // Use actual thread sleep in the loop to avoid busy-waiting
+            // This allows the timer thread to wake us up properly
             while g.status() == GStatus::Waiting {
-                Scheduler::yield_now();
-                thread::yield_now();
+                // Calculate remaining time and sleep for at most 10ms at a time
+                let now = Instant::now();
+                if now >= wake_time {
+                    // Time is up, exit the loop
+                    break;
+                }
+                let remaining = wake_time.saturating_duration_since(now);
+                let sleep_time = std::cmp::min(remaining, Duration::from_millis(TIMER_TICK_MS));
+                std::thread::sleep(sleep_time);
+            }
+
+            // Remove the entry from the bucket if we're still waiting
+            // (we were woken up by timeout, not by the timer thread)
+            if g.status() == GStatus::Waiting {
+                g.set_status(GStatus::Runnable);
             }
         }
         None => {
-            thread::sleep(duration);
+            std::thread::sleep(duration);
         }
     }
 }
