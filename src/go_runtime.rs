@@ -109,7 +109,7 @@ impl Runtime {
         debug!("   Uptime: {:?}", RUNTIME_STATE.start_time.elapsed());
 
         RUNTIME_STATE.shutdown.store(true, Ordering::Relaxed);
-        scheduler::print_scheduler_stats();
+        debug!("   Scheduler stats: {} pending goroutines", scheduler::pending_goroutines());
     }
 
     /// 是否正在关闭

@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const TIMER_BUCKET_COUNT: usize = 64;
-const TIMER_TICK_MS: u64 = 10;
+const TIMER_TICK_MS: u64 = 1;
 
 struct TimerEntry {
     wake_time: Instant,
@@ -148,18 +148,15 @@ pub fn sleep(duration: Duration) {
             let bucket = &TIMER_BUCKETS[bucket_id];
             bucket.heap.lock().push(entry);
 
-            // Use actual thread sleep in the loop to avoid busy-waiting
-            // This allows the timer thread to wake us up properly
+            // 使用 park_timeout 替代 thread::sleep，可被 timer 线程提前 unpark 唤醒
             while g.status() == GStatus::Waiting {
-                // Calculate remaining time and sleep for at most 10ms at a time
                 let now = Instant::now();
                 if now >= wake_time {
-                    // Time is up, exit the loop
                     break;
                 }
                 let remaining = wake_time.saturating_duration_since(now);
-                let sleep_time = std::cmp::min(remaining, Duration::from_millis(TIMER_TICK_MS));
-                std::thread::sleep(sleep_time);
+                let park_time = std::cmp::min(remaining, Duration::from_millis(TIMER_TICK_MS));
+                std::thread::park_timeout(park_time);
             }
 
             // Remove the entry from the bucket if we're still waiting

@@ -11,15 +11,16 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // ============== 优化参数 ==============
 const LOCAL_QUEUE_SIZE: usize = 256;
 const WORK_STEALING_ATTEMPTS: usize = 2;
 
-// ============= 添加 thread_local! 宏 ===========
+// ============= thread_local! ===========
 thread_local! {
     static CURRENT_G: RefCell<Option<Arc<G>>> = RefCell::new(None);
+    static YIELD_REQUESTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 // ============== G (Goroutine) ==============
@@ -33,12 +34,19 @@ pub enum GStatus {
     Dead = 4,
 }
 
+/// 支持两种 goroutine 类型：
+/// - `Once`: 一次性执行（FnOnce），运行到结束
+/// - `Mut`: 可重入执行（FnMut -> bool），返回 true=完成, false=让出
+enum GFunc {
+    Once(Option<Box<dyn FnOnce() + Send + 'static>>),
+    Mut(Box<dyn FnMut() -> bool + Send + 'static>),
+}
+
 pub struct G {
     pub id: usize,
     status: AtomicU8,
-    func: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
+    func: Mutex<Option<GFunc>>,
     created_at: Instant,
-    // 新增栈管理
     stack: Option<Arc<GoroutineStack>>,
     stack_used: AtomicUsize,
 }
@@ -48,7 +56,7 @@ unsafe impl Sync for G {}
 
 impl G {
     #[inline]
-    pub fn new<F>(id: usize, f: F) -> Self
+    pub fn new_once<F>(id: usize, f: F) -> Self
     where
         F: FnOnce() + Send + 'static,
     {
@@ -58,7 +66,7 @@ impl G {
         G {
             id,
             status: AtomicU8::new(GStatus::Idle as u8),
-            func: Mutex::new(Some(Box::new(f))),
+            func: Mutex::new(Some(GFunc::Once(Some(Box::new(f))))),
             created_at: Instant::now(),
             stack: stack.map(Arc::new),
             stack_used: AtomicUsize::new(0),
@@ -66,10 +74,48 @@ impl G {
     }
 
     #[inline]
+    pub fn new_mut<F>(id: usize, f: F) -> Self
+    where
+        F: FnMut() -> bool + Send + 'static,
+    {
+        let stack_allocator = StackAllocator::new();
+        let stack = stack_allocator.alloc().ok();
+        Runtime::track_goroutine();
+        G {
+            id,
+            status: AtomicU8::new(GStatus::Idle as u8),
+            func: Mutex::new(Some(GFunc::Mut(Box::new(f)))),
+            created_at: Instant::now(),
+            stack: stack.map(Arc::new),
+            stack_used: AtomicUsize::new(0),
+        }
+    }
+
+    /// 执行 goroutine。
+    /// - Once 型：消费闭包，运行到结束，完成后 untrack。
+    /// - Mut 型：调用闭包，返回 true=完成并移除闭包，false=让出（保留闭包）。
+    #[inline]
     pub fn run(&self) {
-        if let Some(func) = self.func.lock().take() {
-            func();
-            Runtime::untrack_goroutine();
+        clear_yield_flag();
+        let mut guard = self.func.lock();
+        if let Some(gfunc) = guard.as_mut() {
+            match gfunc {
+                GFunc::Once(opt) => {
+                    if let Some(f) = opt.take() {
+                        f();
+                        *guard = None;
+                        Runtime::untrack_goroutine();
+                    }
+                }
+                GFunc::Mut(f) => {
+                    if f() {
+                        // 完成
+                        *guard = None;
+                        Runtime::untrack_goroutine();
+                    }
+                    // 让出：保留闭包，等待重新调度
+                }
+            }
         }
     }
 
@@ -82,18 +128,22 @@ impl G {
     pub fn set_status(&self, status: GStatus) {
         self.status.store(status as u8, Ordering::Release);
     }
-    // 检查栈使用情况
+
+    /// 检查 goroutine 是否已完成执行（func 已被消费）
+    #[inline]
+    pub fn is_completed(&self) -> bool {
+        self.func.lock().is_none()
+    }
+
     pub fn check_stack(&self) -> bool {
         if let Some(stack) = &self.stack {
             let _used = self.stack_used.load(Ordering::Relaxed);
             if stack.needs_grow() {
-                // 触发栈扩容
                 return false;
             }
         }
         true
     }
-    
 }
 
 impl Drop for G {
@@ -165,7 +215,6 @@ impl P {
             }
         }
         self.work_count.fetch_add(1, Ordering::Relaxed);
-        // Wake up the parked worker thread
         if let Some(thread) = self.park_thread.lock().as_ref() {
             thread.unpark();
         }
@@ -253,17 +302,11 @@ pub struct Scheduler {
     processors: Vec<Arc<P>>,
     next_g_id: AtomicUsize,
     running: AtomicBool,
-    stats: SchedulerStats,
-}
-
-struct SchedulerStats {
-    total_spins: AtomicUsize,
-    total_sleeps: AtomicUsize,
 }
 
 impl Scheduler {
     fn new() -> Self {
-        let p_count = num_cpus::get();
+        let p_count = num_cpus::get() * 2 + 4;
         let mut processors = Vec::with_capacity(p_count);
 
         for i in 0..p_count {
@@ -275,46 +318,24 @@ impl Scheduler {
             processors,
             next_g_id: AtomicUsize::new(1),
             running: AtomicBool::new(true),
-            stats: SchedulerStats {
-                total_spins: AtomicUsize::new(0),
-                total_sleeps: AtomicUsize::new(0),
-            },
         }
     }
 
-    // pub fn init() {
-    //     let p_count = num_cpus::get();
-    //     let m_count = p_count;
-
-    //     debug!("   Starting {} workers (GOMAXPROCS={})", m_count, p_count);
-
-    //     timer::init_timer_thread();
-    //     for i in 0..m_count {
-    //         let p = SCHEDULER.processors[i % p_count].clone();
-
-    //         thread::Builder::new()
-    //             .name(format!("gorust-worker-{}", i))
-    //             .spawn(move || {
-    //                 Self::worker_loop(i, p);
-    //             })
-    //             .unwrap();
-    //     }
-    // }
-
-     pub fn init() {
-        let p_count = num_cpus::get();
+    pub fn init() {
+        let p_count = SCHEDULER.processors.len();
         let m_count = p_count;
 
-        debug!("   Starting {} workers (GOMAXPROCS={})", m_count, p_count);
+        debug!("   Starting {} workers (GOMAXPROCS={})", m_count, num_cpus::get());
 
         timer::init_timer_thread();
         crate::netpoller::start();
 
         for i in 0..m_count {
-            let p = SCHEDULER.processors[i % p_count].clone();
+            let p = SCHEDULER.processors[i].clone();
 
             thread::Builder::new()
                 .name(format!("gorust-worker-{}", i))
+                .stack_size(512 * 1024) // 512KB 栈
                 .spawn(move || {
                     Self::worker_loop(i, p);
                 })
@@ -363,7 +384,6 @@ impl Scheduler {
     pub fn push_global_batch(gs: &[Arc<G>]) {
         let mut global = SCHEDULER.global_queue.lock();
         global.extend_from_slice(gs);
-        // Wake the first worker to pick up global work
         if let Some(p) = SCHEDULER.processors.first() {
             if let Some(thread) = p.park_thread.lock().as_ref() {
                 thread.unpark();
@@ -371,12 +391,13 @@ impl Scheduler {
         }
     }
 
+    /// 创建一次性 goroutine（FnOnce），运行到完成自动释放
     pub fn go<F>(f: F) -> Arc<G>
     where
         F: FnOnce() + Send + 'static,
     {
         let id = SCHEDULER.next_g_id.fetch_add(1, Ordering::Relaxed);
-        let g = Arc::new(G::new(id, f));
+        let g = Arc::new(G::new_once(id, f));
 
         let p_idx = id % SCHEDULER.processors.len();
         SCHEDULER.processors[p_idx].add_g(g.clone());
@@ -384,28 +405,18 @@ impl Scheduler {
         g
     }
 
-    pub fn print_stats() {
-        let mut total_work = 0;
-        let mut total_steals = 0;
-        for p in SCHEDULER.processors.iter() {
-            total_work += p.work_count();
-            total_steals += p.steal_count();
-        }
+    /// 创建可让出的 goroutine（FnMut() -> bool），返回 true=完成, false=让出
+    pub fn go_task<F>(f: F) -> Arc<G>
+    where
+        F: FnMut() -> bool + Send + 'static,
+    {
+        let id = SCHEDULER.next_g_id.fetch_add(1, Ordering::Relaxed);
+        let g = Arc::new(G::new_mut(id, f));
 
-        debug!("=== Scheduler Stats ===");
-        debug!("Active goroutines: {}", Runtime::active_goroutines());
-        debug!("Global queue size: {}", SCHEDULER.global_queue.lock().len());
-        debug!("Total work: {}", total_work);
-        debug!("Total steals: {}", total_steals);
-        debug!(
-            "Total spins: {}",
-            SCHEDULER.stats.total_spins.load(Ordering::Relaxed)
-        );
-        debug!(
-            "Total sleeps: {}",
-            SCHEDULER.stats.total_sleeps.load(Ordering::Relaxed)
-        );
-        debug!("Processors: {}", SCHEDULER.processors.len());
+        let p_idx = id % SCHEDULER.processors.len();
+        SCHEDULER.processors[p_idx].add_g(g.clone());
+
+        g
     }
 
     fn worker_loop(id: usize, p: Arc<P>) {
@@ -414,7 +425,6 @@ impl Scheduler {
         }
         p.set_status(PStatus::Running);
 
-        // Store the current thread handle for park/unpark
         *p.park_thread.lock() = Some(thread::current());
 
         while SCHEDULER.running.load(Ordering::Relaxed) {
@@ -428,20 +438,26 @@ impl Scheduler {
 
                 g.run();
 
-                let status = g.status();
-                if status == GStatus::Running {
+                // 检查 func 是否已被消费：Once 型运行完会被消费，Mut 型 yield 时会保留
+                if g.is_completed() {
                     g.set_status(GStatus::Dead);
                     if cfg!(debug_assertions) {
                         debug!("[Worker {}] G{} completed", id, g.id);
                     }
-                } else if cfg!(debug_assertions) {
-                    debug!("[Worker {}] G{} changed state to {:?}", id, g.id, status);
+                } else {
+                    if cfg!(debug_assertions) {
+                        let st = g.status();
+                        if st == GStatus::Waiting {
+                            debug!("[Worker {}] G{} yielded (Waiting)", id, g.id);
+                        } else {
+                            debug!("[Worker {}] G{} status={:?} (preserved)", id, g.id, st);
+                        }
+                    }
                 }
 
                 Self::set_current_g(None);
             } else {
-                // Park the thread until new work arrives (with 50ms timeout for safety)
-                thread::park_timeout(Duration::from_millis(50));
+                thread::park();
             }
         }
 
@@ -452,7 +468,6 @@ impl Scheduler {
 
     pub fn shutdown() {
         SCHEDULER.running.store(false, Ordering::Relaxed);
-        // Wake all parked workers so they can see the running flag and exit
         for p in SCHEDULER.processors.iter() {
             if let Some(thread) = p.park_thread.lock().as_ref() {
                 thread.unpark();
@@ -477,6 +492,9 @@ impl Scheduler {
         global_size + local_size + runnext_count
     }
 
+    // ============== Yield 机制 ==============
+
+    /// 获取当前正在执行的 G
     pub fn current_g() -> Option<Arc<G>> {
         CURRENT_G.with(|cell| cell.borrow().clone())
     }
@@ -485,22 +503,34 @@ impl Scheduler {
         CURRENT_G.with(|cell| *cell.borrow_mut() = g);
     }
 
+    /// 让出当前 goroutine（设置为 Waiting，等待 FD 就绪后被 netpoller 唤醒）
+    #[inline]
+    pub fn yield_goroutine() {
+        if let Some(g) = CURRENT_G.with(|c| c.borrow().clone()) {
+            g.set_status(GStatus::Waiting);
+            YIELD_REQUESTED.set(true);
+        }
+    }
+
+    /// 检查当前 worker 是否被请求让出
+    #[inline]
+    pub fn is_yield_requested() -> bool {
+        YIELD_REQUESTED.get()
+    }
+
+    /// 清除让出标志
+    #[inline]
+    pub fn clear_yield_flag() {
+        YIELD_REQUESTED.set(false);
+    }
+
+    /// 唤醒一个等待中的 goroutine（被 netpoller 回调调用）
     pub fn wake_g(g: Arc<G>) {
         if g.status() == GStatus::Dead {
             if cfg!(debug_assertions) {
                 log::debug!("[Scheduler] Attempted to wake dead G{}", g.id);
             }
             return;
-        }
-
-        if g.status() != GStatus::Waiting {
-            if cfg!(debug_assertions) {
-                log::debug!(
-                    "[Scheduler] Waking G{} but status is {:?}",
-                    g.id,
-                    g.status()
-                );
-            }
         }
 
         g.set_status(GStatus::Runnable);
@@ -518,14 +548,41 @@ where
     Scheduler::go(f)
 }
 
+pub fn go_task<F>(f: F) -> Arc<G>
+where
+    F: FnMut() -> bool + Send + 'static,
+{
+    Scheduler::go_task(f)
+}
+
 pub fn yield_now() {
     Scheduler::yield_now()
 }
 
-pub fn print_scheduler_stats() {
-    Scheduler::print_stats()
-}
-
 pub fn shutdown() {
     Scheduler::shutdown()
+}
+
+pub fn current_g() -> Option<Arc<G>> {
+    Scheduler::current_g()
+}
+
+pub fn yield_goroutine() {
+    Scheduler::yield_goroutine()
+}
+
+pub fn is_yield_requested() -> bool {
+    Scheduler::is_yield_requested()
+}
+
+pub fn clear_yield_flag() {
+    Scheduler::clear_yield_flag()
+}
+
+pub fn pending_goroutines() -> usize {
+    Scheduler::pending_goroutines()
+}
+
+pub fn wake_g(g: Arc<G>) {
+    Scheduler::wake_g(g)
 }

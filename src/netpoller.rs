@@ -70,8 +70,16 @@ impl NetpollerInner {
                             np.pending.insert(token, (callback, fd));
 
                             let mut source_fd = SourceFd(&fd);
-                            if let Err(e) = poll.registry().register(&mut source_fd, token, interests) {
-                                eprintln!("NETPOLLER: Failed to register fd {}: {}", fd, e);
+                            // 先尝试 reregister（FD 已注册时更新 interest），
+                            // 失败则说明是新 FD，用 register
+                            if let Err(e) = poll.registry().reregister(&mut source_fd, token, interests) {
+                                if e.kind() == io::ErrorKind::NotFound {
+                                    if let Err(e) = poll.registry().register(&mut source_fd, token, interests) {
+                                        eprintln!("NETPOLLER: Failed to register fd {}: {}", fd, e);
+                                    }
+                                } else {
+                                    eprintln!("NETPOLLER: Failed to reregister fd {}: {}", fd, e);
+                                }
                             }
                         }
                         Command::Unregister { token } => {
@@ -87,7 +95,7 @@ impl NetpollerInner {
                 }
             }
 
-            match poll.poll(&mut events, Some(Duration::from_millis(100))) {
+            match poll.poll(&mut events, Some(Duration::from_millis(1))) {
                 Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => {
