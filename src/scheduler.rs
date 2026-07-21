@@ -94,6 +94,8 @@ impl G {
     /// 执行 goroutine。
     /// - Once 型：消费闭包，运行到结束，完成后 untrack。
     /// - Mut 型：调用闭包，返回 true=完成并移除闭包，false=让出（保留闭包）。
+    /// 
+    /// 使用 catch_unwind 捕获 panic，防止单个 goroutine 崩溃导致整个进程退出。
     #[inline]
     pub fn run(&self) {
         clear_yield_flag();
@@ -102,18 +104,35 @@ impl G {
             match gfunc {
                 GFunc::Once(opt) => {
                     if let Some(f) = opt.take() {
-                        f();
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            f();
+                        }));
+                        if let Err(e) = result {
+                            log::error!("[Goroutine {}] panicked: {:?}", self.id, e);
+                        }
                         *guard = None;
                         Runtime::untrack_goroutine();
                     }
                 }
                 GFunc::Mut(f) => {
-                    if f() {
-                        // 完成
-                        *guard = None;
-                        Runtime::untrack_goroutine();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        f()
+                    }));
+                    match result {
+                        Ok(true) => {
+                            // 完成
+                            *guard = None;
+                            Runtime::untrack_goroutine();
+                        }
+                        Ok(false) => {
+                            // 让出：保留闭包，等待重新调度
+                        }
+                        Err(e) => {
+                            log::error!("[Goroutine {}] panicked: {:?}", self.id, e);
+                            *guard = None;
+                            Runtime::untrack_goroutine();
+                        }
                     }
-                    // 让出：保留闭包，等待重新调度
                 }
             }
         }
