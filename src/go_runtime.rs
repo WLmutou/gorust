@@ -1,12 +1,15 @@
 use crate::scheduler;
 use lazy_static::lazy_static;
 use log::debug;
+use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 lazy_static! {
     static ref RUNTIME_STATE: Arc<RuntimeState> = Arc::new(RuntimeState::new());
+    /// 用于通知 wait_for_all 有 goroutine 完成
+    static ref COMPLETION: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 }
 
 static ACTIVE_GOROUTINES: AtomicUsize = AtomicUsize::new(0);
@@ -76,25 +79,14 @@ impl Runtime {
         debug!("⏳ Waiting for all goroutines to complete...");
 
         let start = Instant::now();
-        let mut last_count = Self::active_goroutines();
+        let (lock, cvar) = &*COMPLETION;
 
-        loop {
-            let active = Self::active_goroutines();
-            let pending = scheduler::Scheduler::pending_goroutines();
-            
-            if active == 0 && pending == 0 {
-                break;
-            }
-            
-            if active != last_count {
-                last_count = active;
-                if cfg!(debug_assertions) {
-                    debug!("   Active goroutines: {}, pending: {}", active, pending);
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
-            scheduler::yield_now();
+        let mut guard = lock.lock();
+        while Self::active_goroutines() > 0 {
+            // 等待 Condvar 通知（goroutine 完成时触发）
+            cvar.wait(&mut guard);
         }
+        drop(guard);
 
         debug!("✅ All goroutines completed in {:?}", start.elapsed());
     }
@@ -151,32 +143,29 @@ impl Runtime {
 
     #[inline]
     pub fn untrack_goroutine() {
-        ACTIVE_GOROUTINES.fetch_sub(1, Ordering::Relaxed);
+        let prev = ACTIVE_GOROUTINES.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            // 最后一个 goroutine 完成，通知 wait_for_all
+            let (lock, cvar) = &*COMPLETION;
+            let _guard = lock.lock();
+            cvar.notify_all();
+        }
     }
 
     #[inline]
     pub fn active_goroutines() -> usize {
-        ACTIVE_GOROUTINES.load(Ordering::Relaxed)
+        ACTIVE_GOROUTINES.load(Ordering::Acquire)
     }
 
     /// 等待所有 goroutine 完成并关闭调度器
     pub fn wait_and_shutdown() {
         debug!("⏳ Waiting for all goroutines to complete and queues to drain...");
-        // 等待所有 goroutine 完成且调度队列为空
-        let mut iterations = 0;
-        loop {
-            let active = Self::active_goroutines();
-            let pending = scheduler::Scheduler::pending_goroutines();
-            if active == 0 && pending == 0 {
-                debug!("✅ All goroutines completed and queues drained in {} iterations", iterations);
-                break;
-            }
-            if iterations % 100 == 0 {
-                debug!("   Waiting... active: {}, pending: {}", active, pending);
-            }
-            iterations += 1;
-            std::thread::yield_now();
+        let (lock, cvar) = &*COMPLETION;
+        let mut guard = lock.lock();
+        while Self::active_goroutines() > 0 {
+            cvar.wait(&mut guard);
         }
+        drop(guard);
         
         // 关闭调度器
         scheduler::shutdown();

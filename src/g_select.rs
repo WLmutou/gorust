@@ -1,5 +1,4 @@
 use crate::channel::{Receiver, Channel};
-use crate::scheduler::{GStatus, Scheduler};
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
@@ -161,15 +160,8 @@ impl Select {
                 }
             }
 
-            if let Some(current_g) = Scheduler::current_g() {
-                current_g.set_status(GStatus::Waiting);
-                Scheduler::yield_now();
-                while current_g.status() == GStatus::Waiting {
-                    Scheduler::yield_now();
-                }
-            } else {
-                std::thread::yield_now();
-            }
+            // 在线程模式下，直接让出 CPU
+            std::thread::yield_now();
         }
     }
 }
