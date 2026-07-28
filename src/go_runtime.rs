@@ -1,18 +1,20 @@
 use crate::scheduler;
 use lazy_static::lazy_static;
 use log::debug;
-use parking_lot::{Condvar, Mutex};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 lazy_static! {
     static ref RUNTIME_STATE: Arc<RuntimeState> = Arc::new(RuntimeState::new());
-    /// 用于通知 wait_for_all 有 goroutine 完成
-    static ref COMPLETION: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 }
 
 static ACTIVE_GOROUTINES: AtomicUsize = AtomicUsize::new(0);
+
+/// 用于 wait_for_all 的 Condvar，避免 busy-wait
+lazy_static! {
+    static ref COMPLETION_COND: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
+}
 
 struct RuntimeState {
     active_goroutines: AtomicUsize,
@@ -74,23 +76,6 @@ impl Runtime {
         });
     }
 
-    /// 等待所有 goroutine 完成
-    pub fn wait_for_all() {
-        debug!("⏳ Waiting for all goroutines to complete...");
-
-        let start = Instant::now();
-        let (lock, cvar) = &*COMPLETION;
-
-        let mut guard = lock.lock();
-        while Self::active_goroutines() > 0 {
-            // 等待 Condvar 通知（goroutine 完成时触发）
-            cvar.wait(&mut guard);
-        }
-        drop(guard);
-
-        debug!("✅ All goroutines completed in {:?}", start.elapsed());
-    }
-
     /// 关闭运行时
     pub fn shutdown() {
         debug!("🛑 GoRust Runtime shutting down");
@@ -143,12 +128,11 @@ impl Runtime {
 
     #[inline]
     pub fn untrack_goroutine() {
-        let prev = ACTIVE_GOROUTINES.fetch_sub(1, Ordering::Release);
-        if prev == 1 {
+        if ACTIVE_GOROUTINES.fetch_sub(1, Ordering::Release) == 1 {
             // 最后一个 goroutine 完成，通知 wait_for_all
-            let (lock, cvar) = &*COMPLETION;
-            let _guard = lock.lock();
-            cvar.notify_all();
+            let (lock, cvar) = &*COMPLETION_COND;
+            let _guard = lock.lock().unwrap();
+            cvar.notify_one();
         }
     }
 
@@ -157,16 +141,34 @@ impl Runtime {
         ACTIVE_GOROUTINES.load(Ordering::Acquire)
     }
 
-    /// 等待所有 goroutine 完成并关闭调度器
+    /// 等待所有 goroutine 完成
+    /// 使用 Condvar 等待，避免 busy-wait
+    pub fn wait_for_all() {
+        debug!("⏳ Waiting for all goroutines to complete...");
+
+        // 刷新当前线程的协程创建缓冲区，确保所有协程已加入调度队列
+        scheduler::flush_go_batch();
+
+        let start = Instant::now();
+        let (lock, cvar) = &*COMPLETION_COND;
+
+        // 先快速检查
+        if Self::active_goroutines() == 0 {
+            debug!("✅ All goroutines completed in {:?}", start.elapsed());
+            return;
+        }
+
+        // 使用 Condvar 等待，每次被唤醒后重新检查
+        let mut guard = lock.lock().unwrap();
+        while Self::active_goroutines() > 0 {
+            guard = cvar.wait_timeout(guard, Duration::from_millis(10)).unwrap().0;
+        }
+
+        debug!("✅ All goroutines completed in {:?}", start.elapsed());
+    }
     pub fn wait_and_shutdown() {
         debug!("⏳ Waiting for all goroutines to complete and queues to drain...");
-        let (lock, cvar) = &*COMPLETION;
-        let mut guard = lock.lock();
-        while Self::active_goroutines() > 0 {
-            cvar.wait(&mut guard);
-        }
-        drop(guard);
-        
+        Self::wait_for_all();
         // 关闭调度器
         scheduler::shutdown();
     }

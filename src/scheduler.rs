@@ -1,30 +1,27 @@
 // src/scheduler.rs
-// 使用线程池+工作队列实现 goroutine
-// 跨平台兼容，线程动态创建和复用
-//
-// 优化说明：
-// 1. 后台线程专门负责线程创建，避免 go() 阻塞
-// 2. 预创建更多线程，覆盖中低并发场景
-// 3. 增大批量创建大小，减少批次数
-// 4. 使用定时器线程管理睡眠任务，避免阻塞工作线程
+// M:N 协程调度器
+// 使用 x86_64 汇编上下文切换实现用户态协程
+// 少量 OS 线程（GOMAXPROCS）调度大量用户态协程
 
+use crate::context::{Context, switch_context};
 use crate::go_runtime::Runtime;
 use lazy_static::lazy_static;
 use log::debug;
-use parking_lot::Mutex;
+use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
-// ============== 任务类型 ==============
-// 普通任务：FnOnce，运行到完成
-type Task = Box<dyn FnOnce() + Send + 'static>;
-// 可挂起任务：FnMut() -> bool，返回 true 表示完成，false 表示需要挂起
-type SuspendableTask = Box<dyn FnMut() -> bool + Send + 'static>;
+// ============== 常量 ==============
 
-// ============== G (Goroutine) ==============
+/// 协程栈大小：16KB
+/// Go 的初始栈为 2KB 但可动态扩容，Rust 使用固定栈
+/// 16KB 在大多数场景下足够（包括 HTTP 请求），同时大幅减少内存分配开销
+const G_STACK_SIZE: usize = 16 * 1024;
+
+// ============== G (Goroutine) 状态 ==============
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GStatus {
@@ -35,23 +32,52 @@ pub enum GStatus {
     Dead = 4,
 }
 
+impl From<u8> for GStatus {
+    #[inline]
+    fn from(v: u8) -> Self {
+        match v {
+            0 => GStatus::Idle,
+            1 => GStatus::Runnable,
+            2 => GStatus::Running,
+            3 => GStatus::Waiting,
+            4 => GStatus::Dead,
+            _ => GStatus::Dead,
+        }
+    }
+}
+
+// ============== G (Goroutine) ==============
+
+/// 用户态协程
 pub struct G {
     pub id: usize,
     status: AtomicU8,
-    created_at: Instant,
-    completed: Arc<AtomicBool>,
+    pub ctx: Context,
+    stack: Option<Vec<u8>>,
+    closure: Option<Box<dyn FnOnce() + Send + 'static>>,
+    /// 内联 completed 标志，避免额外的 Arc 分配
+    pub completed: AtomicBool,
 }
 
 unsafe impl Send for G {}
 unsafe impl Sync for G {}
 
 impl G {
-    pub fn new(id: usize) -> Self {
+    fn new(id: usize, closure: Box<dyn FnOnce() + Send + 'static>) -> Self {
+        // 避免零初始化栈内存（16KB 零初始化在大量创建时是瓶颈）
+        let mut stack: Vec<u8> = Vec::with_capacity(G_STACK_SIZE);
+        unsafe { stack.set_len(G_STACK_SIZE); }
+        let stack_top = unsafe { stack.as_mut_ptr().add(G_STACK_SIZE) };
+
+        let ctx = Context::make_initial(stack_top, goroutine_trampoline);
+
         G {
             id,
-            status: AtomicU8::new(GStatus::Running as u8),
-            created_at: Instant::now(),
-            completed: Arc::new(AtomicBool::new(false)),
+            status: AtomicU8::new(GStatus::Runnable as u8),
+            ctx,
+            stack: Some(stack),
+            closure: Some(closure),
+            completed: AtomicBool::new(false),
         }
     }
 
@@ -69,285 +95,306 @@ impl G {
     pub fn is_completed(&self) -> bool {
         self.completed.load(Ordering::Acquire)
     }
-
-    fn completed_flag(&self) -> Arc<AtomicBool> {
-        self.completed.clone()
-    }
 }
 
 impl Drop for G {
     fn drop(&mut self) {
-        if cfg!(debug_assertions) {
-            debug!(
-                "[G{}] Dropped (ran for {:?})",
-                self.id,
-                self.created_at.elapsed()
-            );
+        // 不需要打印调试信息，去掉 created_at 字段以减少创建开销
+    }
+}
+
+/// 从 &G 引用安全创建一个 Arc<G> 克隆
+/// 用于定时器模块保存协程引用
+impl G {
+    pub fn arc_clone(&self) -> Arc<Self> {
+        let ptr = self as *const Self as *mut Self;
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            Arc::from_raw(ptr)
         }
     }
 }
 
-impl From<u8> for GStatus {
-    #[inline]
-    fn from(v: u8) -> Self {
-        match v {
-            0 => GStatus::Idle,
-            1 => GStatus::Runnable,
-            2 => GStatus::Running,
-            3 => GStatus::Waiting,
-            4 => GStatus::Dead,
-            _ => GStatus::Dead,
-        }
-    }
-}
+// ============== 线程本地存储 ==============
 
-// ============== 定时器任务 ==============
-struct TimerEntry {
-    wake_at: Instant,
-    task: Option<SuspendableTask>,
-    worker: Option<thread::Thread>,
+thread_local! {
+    /// 当前工作线程的调度器上下文
+    /// 当协程切换回来时，恢复此上下文以继续调度循环
+    static SCHEDULER_CTX: UnsafeCell<Context> = UnsafeCell::new(Context::new_empty());
+    /// 当前正在运行的协程指针
+    static CURRENT_G: UnsafeCell<*mut G> = UnsafeCell::new(std::ptr::null_mut());
+    /// 协程创建批处理缓冲区（减少锁竞争）
+    static GO_BATCH: UnsafeCell<Vec<Arc<G>>> = UnsafeCell::new(Vec::with_capacity(128));
 }
 
 // ============== 调度器状态 ==============
+
 struct SchedulerState {
-    task_queue: VecDeque<Task>,
-    idle_workers: VecDeque<thread::Thread>,
+    run_queue: VecDeque<Arc<G>>,
     worker_count: usize,
     shutdown: bool,
-    // 定时器相关
-    timers: VecDeque<TimerEntry>,
-    timer_thread: Option<thread::JoinHandle<()>>,
 }
 
-// 批量创建线程的批次大小（增大以减少批次数）
-const BATCH_CREATE_SIZE: usize = 512;
-// 预创建线程池的大小（增大以覆盖更多并发场景）
-const PREALLOC_POOL_SIZE: usize = 8192;
-// 线程栈大小（8KB，最小栈大小）
-const THREAD_STACK_SIZE: usize = 8 * 1024;
-
-// ============== 全局调度器 ==============
 lazy_static! {
     static ref SCHEDULER: Scheduler = Scheduler::new();
+    /// 调度器状态 + 条件变量
+    /// 使用 std::sync::Mutex 以便与 Condvar 配合
+    static ref SCHED_STATE: (std::sync::Mutex<SchedulerState>, std::sync::Condvar) = {
+        let state = SchedulerState {
+            run_queue: VecDeque::new(),
+            worker_count: 0,
+            shutdown: false,
+        };
+        (std::sync::Mutex::new(state), std::sync::Condvar::new())
+    };
+    /// 工作线程句柄，用于 shutdown 时等待线程退出
+    static ref WORKER_HANDLES: std::sync::Mutex<Vec<thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
 }
+
+// ============== 协程入口蹦床函数 ==============
+
+/// 协程入口函数（extern "C" 以匹配 make_initial 的签名）
+/// 每个协程首次运行时从这里开始：
+/// 1. 从 TLS 获取当前 G 指针并保存为本地变量
+/// 2. 执行 G 的闭包
+/// 3. 标记 G 为 Dead
+/// 4. 切换回调度器
+///
+/// 重要：必须使用本地保存的 g_ptr，不能再次读取 CURRENT_G。
+/// 因为 trampoline 是通过 `ret` 进入的（不是 `call`），栈上没有有效的返回地址，
+/// 所以绝不能用普通 `return` 退出，必须始终通过 switch_context 回到调度器。
+#[inline(never)]
+extern "C" fn goroutine_trampoline() {
+    // 1. 从 TLS 获取当前 G 指针并保存为本地变量
+    let g_ptr = CURRENT_G.with(|cg| unsafe { *cg.get() });
+    if g_ptr.is_null() {
+        // 不应该发生，但万一发生，只能返回（会崩溃，但至少不会静默地继续执行）
+        return;
+    }
+
+    unsafe {
+        let g = &mut *g_ptr;
+        // 执行协程闭包
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(closure) = g.closure.take() {
+                closure();
+            }
+        }));
+        if let Err(e) = result {
+            log::error!("[Goroutine {}] panicked: {:?}", g.id, e);
+        }
+        // 标记完成
+        g.completed.store(true, Ordering::Release);
+        g.set_status(GStatus::Dead);
+    }
+
+    Runtime::untrack_goroutine();
+
+    // 2. 切换回调度器
+    // 使用本地保存的 g_ptr，绝不重新读取 CURRENT_G
+    let g = unsafe { &mut *g_ptr };
+    let sched_ctx = SCHEDULER_CTX.with(|sc| unsafe { (*sc.get()).clone() });
+    unsafe {
+        switch_context(&mut g.ctx, &sched_ctx);
+    }
+    // switch_context 恢复调度器上下文后，不会再回到这里
+    // unreachable_unchecked() 告诉编译器这是不可达代码
+    unsafe { std::hint::unreachable_unchecked(); }
+}
+
+// ============== 调度器 ==============
 
 pub(crate) struct Scheduler {
     next_g_id: AtomicUsize,
-    state: Mutex<SchedulerState>,
-    // 通知后台线程创建线程
-    creator_signal: Arc<AtomicBool>,
-}
-
-/// 批量创建工作线程
-fn spawn_worker_threads(count: usize) {
-    for _ in 0..count {
-        let _ = thread::Builder::new()
-            .name("worker".to_string())
-            .stack_size(THREAD_STACK_SIZE)
-            .spawn(|| worker_loop());
-    }
+    initialized: AtomicBool,
 }
 
 impl Scheduler {
-    #[allow(dead_code)]
     fn new() -> Self {
         Scheduler {
             next_g_id: AtomicUsize::new(1),
-            state: Mutex::new(SchedulerState {
-                task_queue: VecDeque::new(),
-                idle_workers: VecDeque::new(),
-                worker_count: 0,
-                shutdown: false,
-                timers: VecDeque::new(),
-                timer_thread: None,
-            }),
-            creator_signal: Arc::new(AtomicBool::new(false)),
+            initialized: AtomicBool::new(false),
         }
     }
 
     pub fn init() {
-        use std::sync::atomic::AtomicBool;
-        static INITIALIZED: AtomicBool = AtomicBool::new(false);
-        if INITIALIZED.swap(true, Ordering::SeqCst) {
+        if SCHEDULER.initialized.swap(true, Ordering::SeqCst) {
             return;
         }
 
-        debug!("   GoRust thread-pool scheduler initialized");
-        debug!("   GOMAXPROCS={}", num_cpus::get());
+        let num_workers = num_cpus::get().max(2);
+        debug!("   GoRust M:N scheduler initialized ({} workers)", num_workers);
 
-        // 启动后台线程创建器
-        let signal = SCHEDULER.creator_signal.clone();
-        thread::Builder::new()
-            .name("thread-creator".to_string())
-            .stack_size(4096)
-            .spawn(move || creator_loop(signal))
-            .ok();
-
-        // 启动定时器线程
-        Scheduler::start_timer_thread();
-
-        // 预创建线程池，避免后续逐个创建线程的开销
         {
-            let mut state = SCHEDULER.state.lock();
-            state.worker_count = PREALLOC_POOL_SIZE;
-            drop(state);
+            let (lock, _) = &*SCHED_STATE;
+            let mut state = lock.lock().unwrap();
+            state.worker_count = num_workers;
         }
-        spawn_worker_threads(PREALLOC_POOL_SIZE);
+
+        // 启动工作线程
+        let mut handles = WORKER_HANDLES.lock().unwrap();
+        for i in 0..num_workers {
+            let handle = thread::Builder::new()
+                .name(format!("worker-{}", i))
+                .stack_size(256 * 1024) // 工作线程栈 256KB
+                .spawn(worker_loop)
+                .ok();
+            if let Some(h) = handle {
+                handles.push(h);
+            }
+        }
+        drop(handles);
 
         crate::netpoller::start();
     }
 
-    /// 启动定时器线程
-    fn start_timer_thread() {
-        let mut state = SCHEDULER.state.lock();
-        if state.timer_thread.is_some() {
-            return;
-        }
-        let handle = thread::Builder::new()
-            .name("timer".to_string())
-            .stack_size(4096)
-            .spawn(|| timer_loop())
-            .unwrap();
-        state.timer_thread = Some(handle);
-    }
-
-    /// 注册定时器：在指定时间后唤醒一个任务
-    #[allow(dead_code)]
-    fn register_timer(duration: Duration, task: SuspendableTask) {
-        let wake_at = Instant::now() + duration;
-        let mut state = SCHEDULER.state.lock();
-        state.timers.push_back(TimerEntry {
-            wake_at,
-            task: Some(task),
-            worker: None,
-        });
-        drop(state);
-    }
-
-    /// 注册定时器：在指定时间后唤醒一个工作线程
-    #[allow(dead_code)]
-    fn register_timer_for_worker(duration: Duration, worker: thread::Thread) {
-        let wake_at = Instant::now() + duration;
-        let mut state = SCHEDULER.state.lock();
-        state.timers.push_back(TimerEntry {
-            wake_at,
-            task: None,
-            worker: Some(worker),
-        });
-        drop(state);
-    }
-
-    /// 创建 goroutine（FnOnce），放入任务队列
+    /// 创建一个新的 goroutine 并加入调度队列
     pub fn go<F>(f: F) -> Arc<G>
     where
         F: FnOnce() + Send + 'static,
     {
         let id = SCHEDULER.next_g_id.fetch_add(1, Ordering::Relaxed);
-        let g = Arc::new(G::new(id));
-        let completed = g.completed_flag();
-
-        // 包装任务：执行、panic处理、完成标记
-        let task = Box::new(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-            if let Err(e) = result {
-                log::error!("[Goroutine {}] panicked: {:?}", id, e);
-            }
-            completed.store(true, Ordering::Release);
-            Runtime::untrack_goroutine();
-        }) as Task;
+        let g = Arc::new(G::new(id, Box::new(f)));
 
         Runtime::track_goroutine();
 
-        let mut state = SCHEDULER.state.lock();
-        state.task_queue.push_back(task);
-
-        // 唤醒空闲工作线程
-        if let Some(worker) = state.idle_workers.pop_front() {
-            drop(state);
-            worker.unpark();
-        } else {
-            // 通知后台线程创建器
-            drop(state);
-            SCHEDULER.creator_signal.store(true, Ordering::Release);
-        }
+        // 先加入线程本地批处理缓冲区
+        // 缓冲区满时再批量刷新到全局队列，减少锁竞争
+        GO_BATCH.with(|batch| {
+            let batch = unsafe { &mut *batch.get() };
+            batch.push(g.clone());
+            if batch.len() >= 128 {
+                Self::flush_go_batch_inner(batch);
+            }
+        });
 
         g
     }
 
-    /// 创建可让出的 goroutine（FnMut() -> bool）
+    /// 刷新线程本地的协程创建缓冲区到全局队列
+    fn flush_go_batch_inner(batch: &mut Vec<Arc<G>>) {
+        if batch.is_empty() {
+            return;
+        }
+        let (lock, cvar) = &*SCHED_STATE;
+        let mut state = lock.lock().unwrap();
+        let was_empty = state.run_queue.is_empty();
+        let count = batch.len();
+        for g in batch.drain(..) {
+            state.run_queue.push_back(g);
+        }
+        // 仅当队列之前为空时才通知，避免批量创建时的惊群效应
+        if was_empty && count > 0 {
+            // 通知多个 worker
+            let worker_count = state.worker_count.max(1);
+            for _ in 0..worker_count.min(count) {
+                cvar.notify_one();
+            }
+        }
+    }
+
+    /// 刷新当前线程的协程创建缓冲区
+    /// 在 wait_for_all 前调用，确保所有协程都已加入调度队列
+    pub fn flush_go_batch() {
+        GO_BATCH.with(|batch| {
+            let batch = unsafe { &mut *batch.get() };
+            if !batch.is_empty() {
+                Self::flush_go_batch_inner(batch);
+            }
+        });
+    }
+
+    /// 创建一个可让出的 goroutine（FnMut）
     pub fn go_task<F>(f: F) -> Arc<G>
     where
         F: FnMut() -> bool + Send + 'static,
     {
-        let id = SCHEDULER.next_g_id.fetch_add(1, Ordering::Relaxed);
         let mut f = f;
-        let g = Arc::new(G::new(id));
-        let completed = g.completed_flag();
-
-        // 对于 FnMut，包装成循环：反复调用直到返回 true
-        let task = Box::new(move || {
+        // 包装成循环：反复调用直到返回 true
+        Scheduler::go(move || {
             loop {
                 if f() {
                     break;
                 }
-                // 让出 CPU 给其他线程
-                thread::yield_now();
+                // 让出 CPU
+                Scheduler::yield_now();
             }
-            completed.store(true, Ordering::Release);
-            Runtime::untrack_goroutine();
-        }) as Task;
+        })
+    }
 
-        Runtime::track_goroutine();
+    /// 直接切换到调度器，不修改协程状态
+    /// 用于 sleep 等场景，协程状态已在调用前设置好
+    pub fn yield_to_scheduler_direct() {
+        let g_ptr = CURRENT_G.with(|cg| unsafe { *cg.get() });
+        if g_ptr.is_null() {
+            return;
+        }
+        let g = unsafe { &mut *g_ptr };
+        // 直接切换到调度器
+        let sched_ctx = SCHEDULER_CTX.with(|sc| unsafe { (*sc.get()).clone() });
+        unsafe {
+            switch_context(&mut g.ctx, &sched_ctx);
+        }
+    }
 
-        let mut state = SCHEDULER.state.lock();
-        state.task_queue.push_back(task);
-
-        if let Some(worker) = state.idle_workers.pop_front() {
-            drop(state);
-            worker.unpark();
-        } else {
-            drop(state);
-            SCHEDULER.creator_signal.store(true, Ordering::Release);
+    /// 让出当前协程的执行权
+    pub fn yield_now() {
+        let g_ptr = CURRENT_G.with(|cg| unsafe { *cg.get() });
+        if g_ptr.is_null() {
+            thread::yield_now();
+            return;
         }
 
-        g
+        let g = unsafe { &mut *g_ptr };
+        // 如果已经是 Waiting 状态（如 sleep 中），保持 Waiting 让定时器唤醒
+        // 否则设置为 Runnable，让调度器重新调度
+        let current_status = g.status();
+        if current_status == GStatus::Running || current_status == GStatus::Runnable {
+            g.set_status(GStatus::Runnable);
+        }
+        // 如果 status 是 Waiting，保持不动，让定时器线程来唤醒
+        // 获取调度器上下文
+        let sched_ctx = SCHEDULER_CTX.with(|sc| unsafe { (*sc.get()).clone() });
+        // 切换回调度器
+        unsafe {
+            switch_context(&mut g.ctx, &sched_ctx);
+        }
+        // 当协程重新被调度时，从这里继续执行
     }
 
     pub fn shutdown() {
-        let mut state = SCHEDULER.state.lock();
-        state.shutdown = true;
-        // 唤醒所有空闲工作线程，让它们退出
-        let workers: Vec<_> = state.idle_workers.drain(..).collect();
-        // 唤醒所有定时器中的工作线程
-        for entry in state.timers.iter_mut() {
-            if let Some(worker) = entry.worker.take() {
-                worker.unpark();
-            }
+        // 设置关闭标志并唤醒所有工作线程
+        {
+            let (lock, cvar) = &*SCHED_STATE;
+            let mut state = lock.lock().unwrap();
+            state.shutdown = true;
+            cvar.notify_all();
         }
-        drop(state);
 
-        for worker in workers {
-            worker.unpark();
+        // 等待所有工作线程退出
+        let handles = std::mem::take(&mut *WORKER_HANDLES.lock().unwrap());
+        for handle in handles {
+            let _ = handle.join();
         }
 
         crate::timer::shutdown_timer();
         crate::netpoller::stop();
     }
 
-    pub fn yield_now() {
-        thread::yield_now();
-    }
-
     #[allow(dead_code)]
     pub fn is_running() -> bool {
-        !SCHEDULER.state.lock().shutdown
+        let (lock, _) = &*SCHED_STATE;
+        let state = lock.lock().unwrap();
+        !state.shutdown
     }
 
     pub fn pending_goroutines() -> usize {
-        Runtime::active_goroutines()
+        let (lock, _) = &*SCHED_STATE;
+        let state = lock.lock().unwrap();
+        state.run_queue.len()
     }
 
-    // ============== 兼容 API（保留供外部 crate 使用） ==============
+    // ============== 兼容 API ==============
     #[allow(dead_code)]
     pub fn current_g() -> Option<Arc<G>> {
         None
@@ -358,18 +405,18 @@ impl Scheduler {
 
     #[inline]
     pub fn yield_goroutine() {
-        thread::yield_now();
+        Scheduler::yield_now();
     }
 
     #[inline]
     pub fn yield_to_scheduler() {
-        thread::yield_now();
+        Scheduler::yield_now();
     }
 
     #[inline]
     #[allow(dead_code)]
     pub fn yield_to_scheduler_with_g(_g: &Arc<G>) {
-        thread::yield_now();
+        Scheduler::yield_now();
     }
 
     #[inline]
@@ -380,155 +427,98 @@ impl Scheduler {
     #[inline]
     pub fn clear_yield_flag() {}
 
-    pub fn wake_g(_g: Arc<G>) {}
-
-    #[allow(dead_code)]
-    pub fn wake_g_batch(_gs: Vec<Arc<G>>) {}
-}
-
-// ============== 后台线程创建器 ==============
-fn creator_loop(signal: Arc<AtomicBool>) {
-    loop {
-        // 等待信号
-        if !signal.swap(false, Ordering::Acquire) {
-            thread::park();
-            continue;
-        }
-
-        // 检查是否需要创建线程
-        loop {
-            let (task_count, idle_count, shutdown) = {
-                let state = SCHEDULER.state.lock();
-                if state.shutdown {
-                    return;
-                }
-                let idle = state.idle_workers.len();
-                let queue = state.task_queue.len();
-                (queue, idle, state.shutdown)
-            };
-
-            if shutdown {
-                return;
-            }
-
-            // 如果队列中的任务少于空闲线程，不需要创建
-            if task_count <= idle_count {
-                break;
-            }
-
-            let needed = task_count - idle_count;
-            let batch = needed.min(BATCH_CREATE_SIZE);
-
-            let mut state = SCHEDULER.state.lock();
-            state.worker_count += batch;
-            drop(state);
-
-            spawn_worker_threads(batch);
-        }
-
-        // 检查是否有新信号（避免丢失信号）
-        if signal.load(Ordering::Acquire) {
-            signal.store(false, Ordering::Release);
+    pub fn wake_g(g: Arc<G>) {
+        let (lock, cvar) = &*SCHED_STATE;
+        let mut state = lock.lock().unwrap();
+        if !state.shutdown && g.status() == GStatus::Waiting {
+            g.set_status(GStatus::Runnable);
+            state.run_queue.push_back(g);
+            cvar.notify_one();
         }
     }
-}
 
-// ============== 定时器线程 ==============
-fn timer_loop() {
-    loop {
-        // 1. 找到最近的下一个唤醒时间
-        let next_wake = {
-            let state = SCHEDULER.state.lock();
-            if state.shutdown {
-                return;
-            }
-            state.timers.iter().map(|t| t.wake_at).min()
-        };
-
-        // 2. 休眠直到下一个唤醒时间
-        let now = Instant::now();
-        let sleep_dur = match next_wake {
-            Some(wake_at) if wake_at > now => wake_at - now,
-            Some(_) => Duration::ZERO,  // 有已到期的定时器，立即处理
-            None => Duration::from_millis(1), // 没有定时器，休眠 1ms 后检查
-        };
-
-        if sleep_dur > Duration::ZERO {
-            thread::park_timeout(sleep_dur);
-        }
-
-        // 3. 获取所有到期的定时器
-        let now = Instant::now();
-        let mut state = SCHEDULER.state.lock();
-        if state.shutdown {
-            return;
-        }
-
-        let mut expired = Vec::new();
-        let mut remaining = VecDeque::new();
-        while let Some(entry) = state.timers.pop_front() {
-            if entry.wake_at <= now {
-                expired.push(entry);
-            } else {
-                remaining.push_back(entry);
-            }
-        }
-        state.timers = remaining;
-
-        if expired.is_empty() {
-            continue;
-        }
-
-        // 4. 批量处理所有到期定时器（避免反复释放/获取锁）
-        let mut need_creator = false;
-        for entry in expired {
-            if let Some(mut task) = entry.task {
-                let task_box: Task = Box::new(move || { task(); });
-                state.task_queue.push_back(task_box);
-                if let Some(worker) = state.idle_workers.pop_front() {
-                    worker.unpark();
-                } else {
-                    need_creator = true;
+    pub fn wake_g_batch(gs: Vec<Arc<G>>) {
+        let (lock, cvar) = &*SCHED_STATE;
+        let mut state = lock.lock().unwrap();
+        if !state.shutdown {
+            let count = gs.len();
+            for g in gs {
+                if g.status() == GStatus::Waiting {
+                    g.set_status(GStatus::Runnable);
+                    state.run_queue.push_back(g);
                 }
-            } else if let Some(worker) = entry.worker {
-                // 工作线程定时器到期：直接唤醒
-                worker.unpark();
             }
-        }
-
-        if need_creator {
-            drop(state);
-            SCHEDULER.creator_signal.store(true, Ordering::Release);
+            if !state.run_queue.is_empty() {
+                // 通知多个 worker 处理新任务
+                // 最多通知 worker 数量，避免惊群效应
+                let worker_count = state.worker_count.max(1);
+                for _ in 0..worker_count.min(count) {
+                    cvar.notify_one();
+                }
+            }
         }
     }
 }
 
 // ============== 工作线程循环 ==============
+
 fn worker_loop() {
+    let (lock, cvar) = &*SCHED_STATE;
+
     loop {
-        // 尝试获取任务
-        let task = {
-            let mut state = SCHEDULER.state.lock();
-            if let Some(task) = state.task_queue.pop_front() {
-                drop(state);
-                task
-            } else if state.shutdown {
-                return;
-            } else {
-                // 没有任务，休眠等待
-                state.idle_workers.push_back(thread::current());
-                drop(state);
-                thread::park();
-                continue;
+        // 1. 从全局队列获取一个可运行的 G
+        let g = {
+            let mut state = lock.lock().unwrap();
+
+            loop {
+                if state.shutdown {
+                    return;
+                }
+                if let Some(g) = state.run_queue.pop_front() {
+                    // 如果队列中还有更多任务，唤醒其他 worker
+                    if !state.run_queue.is_empty() {
+                        cvar.notify_one();
+                    }
+                    break g;
+                }
+                // 队列为空，等待
+                state = cvar.wait(state).unwrap();
             }
         };
 
-        // 执行任务
-        task();
+        // 2. 设置当前 G 到 TLS
+        let g_ptr: *mut G = Arc::as_ptr(&g) as *mut G;
+        CURRENT_G.with(|cg| unsafe { *cg.get() = g_ptr });
+        g.set_status(GStatus::Running);
+
+        // 3. 保存调度器上下文，切换到协程
+        let sched_ctx = SCHEDULER_CTX.with(|sc| unsafe { &mut *sc.get() });
+        unsafe {
+            switch_context(sched_ctx, &g.ctx);
+        }
+        // 当协程让出或完成时，会回到这里
+
+        // 4. 检查协程状态
+        let status = g.status();
+        if status == GStatus::Dead {
+            // 协程已完成，释放资源
+            CURRENT_G.with(|cg| unsafe { *cg.get() = std::ptr::null_mut() });
+        } else if status == GStatus::Runnable {
+            // 协程让出了（如 yield_now），重新加入调度队列
+            let mut state = lock.lock().unwrap();
+            if !state.shutdown {
+                state.run_queue.push_back(g);
+            }
+        } else if status == GStatus::Waiting {
+            // 协程正在等待（如 sleep），由定时器线程唤醒
+            // 清除 CURRENT_G，允许 worker 处理其他协程
+            CURRENT_G.with(|cg| unsafe { *cg.get() = std::ptr::null_mut() });
+        }
     }
 }
 
 // ============== 公共 API ==============
+
 pub fn go<F>(f: F) -> Arc<G>
 where
     F: FnOnce() + Send + 'static,
@@ -563,6 +553,12 @@ pub fn yield_to_scheduler() {
     Scheduler::yield_to_scheduler()
 }
 
+/// 直接切换到调度器，不修改协程状态
+/// 用于 sleep 等场景，协程状态已在调用前设置好
+pub fn yield_to_scheduler_direct() {
+    Scheduler::yield_to_scheduler_direct()
+}
+
 pub fn is_yield_requested() -> bool {
     Scheduler::is_yield_requested()
 }
@@ -575,6 +571,22 @@ pub fn pending_goroutines() -> usize {
     Scheduler::pending_goroutines()
 }
 
+/// 刷新当前线程的协程创建缓冲区
+/// 确保所有通过 go() 创建的协程都已加入调度队列
+pub fn flush_go_batch() {
+    Scheduler::flush_go_batch()
+}
+
 pub fn wake_g(g: Arc<G>) {
     Scheduler::wake_g(g)
+}
+
+pub fn wake_g_batch(gs: Vec<Arc<G>>) {
+    Scheduler::wake_g_batch(gs)
+}
+
+/// 获取当前协程的原始指针（供定时器模块使用）
+/// 如果不在协程上下文中，返回 null
+pub fn current_g_for_timer() -> *mut G {
+    CURRENT_G.with(|cg| unsafe { *cg.get() })
 }
