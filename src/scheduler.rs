@@ -15,10 +15,10 @@ use std::thread;
 
 // ============== 常量 ==============
 
-/// 协程栈大小：16KB
+/// 协程栈大小：64KB
 /// Go 的初始栈为 2KB 但可动态扩容，Rust 使用固定栈
-/// 16KB 在大多数场景下足够（包括 HTTP 请求），同时大幅减少内存分配开销
-const G_STACK_SIZE: usize = 16 * 1024;
+/// 64KB 在大多数场景下足够（包括 HTTP 请求），同时大幅减少内存分配开销
+const G_STACK_SIZE: usize = 64 * 1024;
 
 // ============== G (Goroutine) 状态 ==============
 
@@ -371,11 +371,8 @@ impl Scheduler {
             cvar.notify_all();
         }
 
-        // 等待所有工作线程退出
-        let handles = std::mem::take(&mut *WORKER_HANDLES.lock().unwrap());
-        for handle in handles {
-            let _ = handle.join();
-        }
+        // 不等待工作线程退出，主线程退出时进程会终止所有线程
+        let _ = std::mem::take(&mut *WORKER_HANDLES.lock().unwrap());
 
         crate::timer::shutdown_timer();
         crate::netpoller::stop();
@@ -395,9 +392,17 @@ impl Scheduler {
     }
 
     // ============== 兼容 API ==============
-    #[allow(dead_code)]
     pub fn current_g() -> Option<Arc<G>> {
-        None
+        CURRENT_G.with(|cg| unsafe {
+            let ptr = *cg.get();
+            if ptr.is_null() {
+                None
+            } else {
+                // 先增加引用计数，再从裸指针创建 Arc
+                Arc::increment_strong_count(ptr);
+                Some(Arc::from_raw(ptr))
+            }
+        })
     }
 
     #[allow(dead_code)]

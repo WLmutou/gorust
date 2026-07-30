@@ -62,18 +62,6 @@ impl Runtime {
         debug!("🚀 GoRust Runtime v0.2.0 initialized");
         debug!("   GOMAXPROCS={}", num_cpus::get());
         scheduler::Scheduler::init();
-
-        // 注册 Ctrl-C 信号处理
-        Self::setup_signal_handler();
-    }
-
-    /// 设置 Ctrl-C 信号处理
-    fn setup_signal_handler() {
-        let _ = ctrlc::set_handler(|| {
-            debug!("📡 Received Ctrl-C signal, initiating shutdown...");
-            scheduler::shutdown();
-            std::process::exit(0);
-        });
     }
 
     /// 关闭运行时

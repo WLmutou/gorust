@@ -18,7 +18,7 @@ pub use channel::{
 };
 
 pub use go_runtime::Runtime;
-pub use scheduler::{go, go_task, yield_now};
+pub use scheduler::{go, go_task, yield_now, flush_go_batch, shutdown};
 pub use timer::{sleep_ms, sleep};
 
 pub use g_select::{Select, SelectOutcome, select_builder};

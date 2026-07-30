@@ -4,7 +4,22 @@ use crate::channel::unbounded;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, TcpListener, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// accept() 关闭标志，用于 Ctrl-C 优雅关闭
+static ACCEPT_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// 设置 accept() 关闭标志，用于优雅关闭
+pub fn shutdown_accept() {
+    ACCEPT_SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+/// 重置 accept() 关闭标志
+#[allow(dead_code)]
+pub fn reset_accept_shutdown() {
+    ACCEPT_SHUTDOWN.store(false, Ordering::SeqCst);
+}
 
 pub struct AsyncTcpStream {
     stream: TcpStream,
@@ -252,6 +267,10 @@ impl AsyncTcpListener {
                     }),
                 );
                 std::thread::park();
+                // 检查是否收到关闭信号（Ctrl-C），如果是则返回 Interrupted 错误
+                if ACCEPT_SHUTDOWN.load(Ordering::SeqCst) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "shutdown requested"));
+                }
                 continue;
             }
             return Err(err);
